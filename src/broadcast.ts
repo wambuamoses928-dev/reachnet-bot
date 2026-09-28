@@ -23,6 +23,16 @@ function humanGap() {
   return randomInt(25_000, 70_000); // 25-70s between groups
 }
 
+/** Hard timeout wrapper — a single stuck send must never freeze the poller. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
 type QueuedBroadcast = {
   id: string;
   user_id: string;
@@ -108,10 +118,16 @@ async function processOne(b: QueuedBroadcast) {
     // telegram fallback: plain messages with the usual pacing
     for (const g of tgGroups) {
       let ok = false;
-      if (tgBot) ok = await sendToTelegramGroup(tgBot, g.group_ref, content);
+      if (tgBot) {
+        ok = await withTimeout(
+          sendToTelegramGroup(tgBot, g.group_ref, content),
+          120_000,
+          `telegram send to ${g.name}`
+        ).catch(() => false);
+        await delay(humanGap());
+      }
       ok ? (statusSent = statusSent + 1) : (statusFailed = statusFailed + 1);
       (results.perGroup as Array<{ group: string; ok: boolean }>).push({ group: g.name, ok });
-      await delay(humanGap());
     }
 
     results.sent = statusSent;
@@ -121,30 +137,67 @@ async function processOne(b: QueuedBroadcast) {
     // ── CHAT MODE: per-group messages, text or image+caption, human-paced
     for (const g of groups) {
       let ok = false;
+      let attempted = false;
       if (g.platform === "whatsapp") {
         const sock = sessions.get(g.link_id);
-        if (sock)
-          ok = await sendToGroup(
-            sock,
-            g.group_ref,
-            content,
-            media?.url ? { url: media.url, mimetype: media.mimetype } : null
-          );
+        if (sock) {
+          attempted = true;
+          ok = await withTimeout(
+            sendToGroup(
+              sock,
+              g.group_ref,
+              content,
+              media?.url ? { url: media.url, mimetype: media.mimetype } : null
+            ),
+            120_000,
+            `whatsapp send to ${g.name}`
+          ).catch(() => false);
+        }
       } else if (g.platform === "telegram" && tgBot) {
-        ok = await sendToTelegramGroup(tgBot, g.group_ref, content);
+        attempted = true;
+        ok = await withTimeout(
+          sendToTelegramGroup(tgBot, g.group_ref, content),
+          120_000,
+          `telegram send to ${g.name}`
+        ).catch(() => false);
       }
       ok ? (results.sent = (results.sent as number) + 1) : (results.failed = (results.failed as number) + 1);
       (results.perGroup as Array<{ group: string; ok: boolean }>).push({
         group: g.name,
         ok,
       });
-      await delay(humanGap()); // never machine-gun the groups
+      // human pacing only after a real send attempt — dead sessions don't
+      // need 47s waits that freeze the whole queue behind them
+      if (attempted) await delay(humanGap());
     }
   }
 
   const status = results.failed === 0 ? "done" : results.sent === 0 ? "failed" : "partial";
   await updateBroadcast(broadcastId, { status, stats: results });
   log.info({ broadcastId, status, mode: mode ?? "chat", sent: results.sent, failed: results.failed }, "broadcast finished");
+}
+
+/** A worker restart or a hang can leave rows stuck in "sending" forever.
+ * Anything older than 30 minutes in that state is marked failed — the user
+ * can re-send from the UI. (Not requeued: some groups may already have got it.) */
+async function recoverStaleSending() {
+  const cutoff = Date.now() - 30 * 60_000;
+  const { data, error } = await db
+    .from("broadcasts")
+    .select("id, updated_date")
+    .eq("status", "sending");
+  if (error) return;
+  const stale = (data ?? []).filter((r: { id: string; updated_date: string }) => {
+    const t = Date.parse(r.updated_date);
+    return Number.isFinite(t) && t < cutoff;
+  });
+  for (const r of stale) {
+    log.warn({ broadcastId: r.id }, "marking stale 'sending' broadcast as failed");
+    await updateBroadcast(r.id, {
+      status: "failed",
+      stats: { error: "timed out while sending (worker restarted or send hung) — safe to re-send" },
+    }).catch(() => {});
+  }
 }
 
 /** Poll the broadcasts queue. ReachNet's UI writes 'queued' rows; we do the rest. */
@@ -156,14 +209,23 @@ export function startBroadcastPoller() {
     if (running) return;
     running = true;
     try {
+      await recoverStaleSending();
       const queued = await fetchQueuedBroadcasts();
       for (const b of queued) {
-        await processOne(b);
+        try {
+          await withTimeout(processOne(b), 25 * 60_000, `broadcast ${b.id}`);
+        } catch (e) {
+          log.error({ broadcastId: b.id, err: String(e) }, "broadcast crashed/timed out");
+          await updateBroadcast(b.id, {
+            status: "failed",
+            stats: { error: String(e).slice(0, 500) },
+          }).catch(() => {});
+        }
       }
     } catch (e) {
       log.error({ err: String(e) }, "broadcast poll failed");
     } finally {
-      running = false;
+      running = false; // ALWAYS reset — a stuck run must not starve the queue
     }
   }, intervalMs);
 
