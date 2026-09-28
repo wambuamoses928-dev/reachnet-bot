@@ -94,7 +94,14 @@ export function registerApi(app: express.Express) {
         return;
       }
       log.error({ uid, err: msg }, "pairing failed");
-      res.status(500).json({ error: "Could not start pairing. Try again in a minute." });
+      await db
+        .from("bot_debug")
+        .insert({ scope: "pairing", message: msg.slice(0, 500), detail: { uid, phone } })
+        .catch(() => {});
+      res.status(500).json({
+        error: "Could not start pairing. Try again in a minute.",
+        detail: msg.slice(0, 160),
+      });
     }
   });
 

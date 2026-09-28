@@ -210,7 +210,27 @@ export async function startPairing(
   }
 
   const sock = await startSession(link, async () => {});
-  const pairingCode = await sock.requestPairingCode(phoneE164);
+
+  // Baileys builds the WA jid straight from this string — MUST be digits only
+  // (a leading "+" produces an invalid jid and the pairing IQ fails).
+  const digits = phoneE164.replace(/\D/g, "");
+  if (digits.length < 8) throw new Error("BAD_PHONE");
+
+  // The pairing IQ needs a live websocket. The QR event is the "socket ready"
+  // signal — wait for it (or an open connection) before requesting the code.
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("PAIR_SOCKET_TIMEOUT")), 25_000);
+    const onUpdate = (u: { connection?: string; qr?: string }) => {
+      if (u.qr || u.connection === "open") {
+        clearTimeout(timer);
+        sock.ev.off("connection.update", onUpdate);
+        resolve();
+      }
+    };
+    sock.ev.on("connection.update", onUpdate);
+  });
+
+  const pairingCode = await sock.requestPairingCode(digits);
   await updateLink(link.id, { pairing_code: pairingCode as string });
   log.info({ linkId: link.id }, "pairing code issued (API)");
   return { linkId: link.id, pairingCode: pairingCode as string };
