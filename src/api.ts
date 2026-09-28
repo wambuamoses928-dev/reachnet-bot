@@ -173,6 +173,43 @@ export function registerApi(app: express.Express) {
     res.json({ ok: true });
   });
 
+  // ── TEMPORARY ops: run a SQL migration against ReachNet Supabase.
+  //    Guarded by ADMIN_SECRET; removed after use. Uses the direct Postgres
+  //    connection (5432) which is unreachable from local sandboxes.
+  app.post("/admin/exec-sql", async (req, res) => {
+    const secret = process.env.ADMIN_SECRET ?? "";
+    if (!secret || req.header("x-admin-secret") !== secret) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    const sql = String(req.body?.sql ?? "").trim();
+    if (!sql) {
+      res.status(400).json({ error: "sql required" });
+      return;
+    }
+    try {
+      const { Client } = await import("pg");
+      const client = new Client({
+        host: `db.${process.env.SUPABASE_PROJECT_REF}.supabase.co`,
+        port: 5432,
+        database: "postgres",
+        user: "postgres",
+        password: process.env.SUPABASE_DB_PASSWORD,
+        ssl: { rejectUnauthorized: false },
+        statement_timeout: 30_000,
+      });
+      await client.connect();
+      await client.query(sql);
+      const probe = await client.query(
+        "select username, referral_code, referred_by from public.reachnet_profiles order by joined_at"
+      );
+      await client.end();
+      res.json({ ok: true, profiles: probe.rows });
+    } catch (e) {
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
   // ── Ops: wipe ALL session folders (ADMIN_SECRET header). Only safe while
   //    no live connected accounts exist; used to clear poisoned pairing
   //    identities after WhatsApp pairing restrictions.
