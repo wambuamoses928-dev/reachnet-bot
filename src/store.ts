@@ -40,6 +40,11 @@ export type Broadcast = {
   id: string;
   user_id: string;
   content: string;
+  /** delivery form: plain group message or WhatsApp group status (green ring) */
+  mode?: "chat" | "status" | null;
+  media_url?: string | null;
+  media_kind?: string | null;
+  media_mimetype?: string | null;
   link_id?: string | null;
   status: "queued" | "sending" | "done" | "partial" | "failed";
   stats?: Record<string, unknown> | null;

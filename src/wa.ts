@@ -4,6 +4,10 @@ import makeWASocket, {
   fetchLatestWaWebVersion,
   Browsers,
   DisconnectReason,
+  generateWAMessageContent,
+  generateWAMessageFromContent,
+  generateMessageIDV2,
+  jidNormalizedUser,
   type WASocket,
   type GroupMetadata,
 } from "@whiskeysockets/baileys";
@@ -373,17 +377,145 @@ export async function restoreSessions(onConnected: OnConnected) {
   }
 }
 
-/** Send text to a linked group (used by the broadcast worker). */
+/** Send a chat broadcast to a linked group: text, or image with caption. */
 export async function sendToGroup(
   sock: WASocket,
   groupRef: string,
-  message: string
+  message: string,
+  media?: { url: string; mimetype?: string } | null
 ): Promise<boolean> {
   try {
-    await sock.sendMessage(groupRef, { text: message });
+    const content = media?.url
+      ? { image: { url: media.url }, caption: message || undefined }
+      : { text: message };
+    await sock.sendMessage(groupRef, content);
     return true;
   } catch (e) {
     log.error({ groupRef, err: String(e) }, "group send failed");
     return false;
   }
+}
+
+/* ── WhatsApp GROUP STATUS broadcast (the "green ring") ──────────
+ * Ported from the proven nexmint-wa-bot protocol (24 days, zero
+ * bans). Two-step, mirroring WhatsApp Web's own group status flow:
+ *   1. Post ONE status to status@broadcast whose audience is the
+ *      flattened, deduped member JIDs of the target groups
+ *      (statusJidList), with a meta/mentioned_users node listing
+ *      the group JIDs — in audience CHUNKS so Baileys' per-member
+ *      USync device queries stay small and never hit the 60s
+ *      timeout.
+ *   2. For each group, relay a groupStatusMessageV2 into the group —
+ *      this renders the status card in the group chat and puts the
+ *      ring on the group icon. Media is uploaded ONCE and
+ *      referenced by every relay.
+ */
+
+const STATUS_BG_DEFAULT = "#075E54"; // WhatsApp teal
+const STATUS_FONT_DEFAULT = 2;
+const STATUS_CHUNK = 400; // members per status@broadcast post
+
+export async function sendGroupStatus(
+  sock: WASocket,
+  groups: Array<{ group_ref: string; name: string }>,
+  caption: string,
+  media?: { url: string; mimetype?: string } | null
+): Promise<{ sent: number; failed: number; error?: string }> {
+  if (!sock.user) return { sent: 0, failed: groups.length, error: "session not connected" };
+
+  // 1) Audience: deduped member JIDs of all target groups + self
+  const audience = new Set<string>([jidNormalizedUser(sock.user.id)]);
+  const groupJids: string[] = [];
+  for (const g of groups) {
+    try {
+      const meta = await sock.groupMetadata(g.group_ref);
+      groupJids.push(g.group_ref);
+      for (const p of meta.participants ?? []) audience.add(jidNormalizedUser(p.id));
+    } catch (e) {
+      log.warn({ groupRef: g.group_ref, err: String(e) }, "groupMetadata failed — group skipped from status audience");
+    }
+  }
+  if (groupJids.length === 0) return { sent: 0, failed: groups.length, error: "no group metadata" };
+  const statusJidList = [...audience];
+
+  // 2) Build the status content ONCE (single media upload, reused by all relays)
+  const content = media?.url
+    ? { image: { url: media.url }, caption: caption || undefined }
+    : { text: caption };
+  const contentOpts: Record<string, unknown> = { upload: sock.waUploadToServer };
+  if (!media?.url) {
+    contentOpts.backgroundColor = STATUS_BG_DEFAULT;
+    contentOpts.font = STATUS_FONT_DEFAULT;
+  }
+  const waContent = await generateWAMessageContent(content, contentOpts as never);
+  const contentMsg = (waContent as { message?: unknown }).message ?? waContent;
+
+  // 3) Post the status to status@broadcast in audience chunks
+  const metaNodes = [
+    {
+      tag: "meta",
+      attrs: {},
+      content: [
+        {
+          tag: "mentioned_users",
+          attrs: {},
+          content: groupJids.map((gjid) => ({ tag: "to", attrs: { jid: jidNormalizedUser(gjid) } })),
+        },
+      ],
+    },
+  ];
+  for (let i = 0; i < statusJidList.length; i += STATUS_CHUNK) {
+    const chunk = statusJidList.slice(i, i + STATUS_CHUNK);
+    const msg = generateWAMessageFromContent("status@broadcast", contentMsg as never, {
+      userJid: sock.user.id,
+      messageId: generateMessageIDV2(sock.user.id),
+    });
+    if (!msg.message || !msg.key?.id) throw new Error("failed to build status message");
+    // "not-acceptable" / "Timed Out" here means WhatsApp is flow-controlling the
+    // account — back off and retry honestly instead of hammering.
+    let chunkOk = false;
+    const BACKOFFS = [30_000, 60_000];
+    for (let attempt = 0; attempt <= BACKOFFS.length && !chunkOk; attempt++) {
+      try {
+        await sock.relayMessage("status@broadcast", msg.message, {
+          messageId: msg.key.id,
+          statusJidList: chunk,
+          additionalNodes: metaNodes as never,
+        });
+        chunkOk = true;
+      } catch (e) {
+        const em = e instanceof Error ? e.message : String(e);
+        if (attempt < BACKOFFS.length) {
+          log.warn({ attempt: attempt + 1, err: em }, "status chunk throttled — backing off");
+          await sleep(BACKOFFS[attempt]);
+        } else {
+          throw new Error(
+            `${em} (WhatsApp is rate-limiting status posts on this number — benched this run; chat broadcasts are unaffected)`
+          );
+        }
+      }
+    }
+    log.info({ chunk: Math.floor(i / STATUS_CHUNK) + 1, members: chunk.length }, "status chunk posted");
+    if (i + STATUS_CHUNK < statusJidList.length) await sleep(5_000);
+  }
+
+  // 4) Per-group status message: relays the same generated content into
+  //    each group — renders the card + puts the ring on the group icon.
+  let sent = 0;
+  let failed = 0;
+  for (const gjid of groupJids) {
+    try {
+      const v2 = {
+        groupStatusMessageV2: { message: contentMsg },
+      } as never;
+      await sock.relayMessage(gjid, v2, { messageId: generateMessageIDV2(sock.user.id) });
+      sent++;
+    } catch (e) {
+      failed++;
+      log.error({ gjid, err: String(e) }, "group status relay failed");
+    }
+    await sleep(1_500); // pacing between relays
+  }
+  log.info({ sent, failed, audience: statusJidList.length, groups: groupJids.length }, "group status finished");
+  return { sent, failed };
 }
