@@ -1,6 +1,7 @@
 import express from "express";
 import pino from "pino";
 import { restoreSessions, sessions } from "./wa.js";
+import { registerApi } from "./api.js";
 import { startTelegram } from "./tg.js";
 import { setTelegramBot, startBroadcastPoller } from "./broadcast.js";
 
@@ -9,13 +10,7 @@ const log = pino({ name: "main" });
 async function main() {
   // 1. Healthcheck endpoint (Railway healthcheck + basic ops surface)
   const app = express();
-  app.get("/health", (_req, res) => {
-    res.json({
-      ok: true,
-      whatsappSessions: sessions.size,
-      uptime: process.uptime(),
-    });
-  });
+  registerApi(app); // /health + pairing/group endpoints (CORS-restricted)
   const port = Number(process.env.PORT ?? 3000);
   app.listen(port, () => log.info({ port }, "healthcheck listening"));
 

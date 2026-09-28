@@ -167,3 +167,51 @@ export async function sendToGroup(
     return false;
   }
 }
+
+/** API path for pairing: reuse an existing (pending/disconnected) link row,
+ *  create one if none, then issue a fresh pairing code. */
+export async function startPairing(
+  userId: string,
+  phoneE164: string
+): Promise<{ linkId: string; pairingCode: string }> {
+  const { data: existing } = await db
+    .from("bot_links")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("platform", "whatsapp")
+    .maybeSingle();
+  let link = (existing as BotLink | null) ?? null;
+
+  if (link?.status === "connected") throw new Error("ALREADY_LINKED");
+
+  if (!link) {
+    const { data: created, error } = await db
+      .from("bot_links")
+      .insert({ user_id: userId, platform: "whatsapp", status: "pending", phone_e164: phoneE164 })
+      .select()
+      .single();
+    if (error) throw error;
+    link = created as BotLink;
+  } else {
+    await db
+      .from("bot_links")
+      .update({ status: "pending", phone_e164: phoneE164, pairing_code: null, updated_date: new Date().toISOString() })
+      .eq("id", link.id);
+    link = { ...link, status: "pending", phone_e164: phoneE164 };
+  }
+
+  // Kill any stale socket for this link before starting a new session.
+  const stale = sessions.get(link.id);
+  sessions.delete(link.id);
+  try {
+    stale?.end(new Error("re-pairing"));
+  } catch {
+    // ignore
+  }
+
+  const sock = await startSession(link, async () => {});
+  const pairingCode = await sock.requestPairingCode(phoneE164);
+  await updateLink(link.id, { pairing_code: pairingCode as string });
+  log.info({ linkId: link.id }, "pairing code issued (API)");
+  return { linkId: link.id, pairingCode: pairingCode as string };
+}
