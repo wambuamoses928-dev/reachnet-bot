@@ -6,7 +6,7 @@ import {
   fetchQueuedBroadcasts,
   updateBroadcast,
 } from "./store.js";
-import { sendToGroup, sendAdCard, sendGroupStatus, sessions } from "./wa.js";
+import { sendToGroup, sendAdCard, sendGroupStatus, sessions, sendTextViaRelay, sendTemplateCard } from "./wa.js";
 import { sendToTelegramGroup } from "./tg.js";
 
 const log = pino({ name: "broadcast" });
@@ -150,17 +150,40 @@ async function processOne(b: QueuedBroadcast) {
             ? `https://wa.me/${phone}?text=${encodeURIComponent("Hello, can I get more information on this")}`
             : null;
           const mediaArg = media?.url ? { url: media.url, mimetype: media.mimetype } : null;
-          if (cta) {
+          // A/B diagnostics: content prefixes force a specific sender so we
+          // can identify which payload type WhatsApp actually delivers.
+          let variant: "auto" | "v2" | "template" | "relaytest" = "auto";
+          let body = content;
+          if (content.startsWith("CARDV2:")) {
+            variant = "v2"; body = content.slice(8).trim();
+          } else if (content.startsWith("TEMPLATE:")) {
+            variant = "template"; body = content.slice(9).trim();
+          } else if (content.startsWith("RELAYTEST:")) {
+            variant = "relaytest"; body = content.slice(10).trim();
+          }
+          if (variant === "relaytest") {
             ok = await withTimeout(
-              sendAdCard(sock, g.group_ref, content, cta, mediaArg),
+              sendTextViaRelay(sock, g.group_ref, body),
+              120_000,
+              `whatsapp relay test to ${g.name}`
+            ).catch(() => false);
+          } else if (variant === "template" && cta) {
+            ok = await withTimeout(
+              sendTemplateCard(sock, g.group_ref, body, cta),
+              120_000,
+              `whatsapp template card to ${g.name}`
+            ).catch(() => false);
+          } else if (cta) {
+            ok = await withTimeout(
+              sendAdCard(sock, g.group_ref, body, cta, mediaArg, variant === "v2" ? "v2" : "v1"),
               120_000,
               `whatsapp card to ${g.name}`
             ).catch(() => false);
           }
           if (!ok) {
-            const plain = cta && !/wa\.me/i.test(content)
-              ? `${content}\n\nChat on WhatsApp 👉 ${cta}`
-              : content;
+            const plain = cta && !/wa\.me/i.test(body)
+              ? `${body}\n\nChat on WhatsApp 👉 ${cta}`
+              : body;
             ok = await withTimeout(
               sendToGroup(sock, g.group_ref, plain, mediaArg),
               120_000,

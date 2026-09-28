@@ -404,7 +404,8 @@ export async function sendAdCard(
   groupRef: string,
   caption: string,
   ctaUrl: string,
-  media?: { url: string; mimetype?: string } | null
+  media?: { url: string; mimetype?: string } | null,
+  envelope: "v1" | "v2" = "v1"
 ): Promise<boolean> {
   try {
     let header: Record<string, unknown>;
@@ -449,25 +450,39 @@ export async function sendAdCard(
     // top-level "interactive" key in this Baileys version — it falls through
     // to prepareWAMessageMedia and throws "Invalid media type". Build the
     // Message proto ourselves and relay it directly instead.
+    // Real WhatsApp Web wraps interactive messages in a viewOnce envelope
+    // with messageContextInfo — a bare interactiveMessage is SILENTLY DROPPED
+    // by the servers. v1 = viewOnceMessage, v2 = viewOnceMessageV2.
+    const inner = {
+      messageContextInfo: {
+        deviceListMetadata: {},
+        deviceListMetadataVersion: 2,
+      },
+      interactiveMessage: payload.interactive,
+    };
+    const wrapped =
+      envelope === "v2"
+        ? { viewOnceMessageV2: { message: inner } }
+        : { viewOnceMessage: { message: inner } };
+    return relayRaw(sock, groupRef, wrapped);
+  } catch (e) {
+    log.error({ groupRef, err: String(e) }, "ad card send failed");
+    return false;
+  }
+}
+
+/** Relay a raw pre-built WAMessage (content map) to a group. */
+async function relayRaw(
+  sock: WASocket,
+  groupRef: string,
+  content: Record<string, unknown>
+): Promise<boolean> {
+  try {
     const selfId = sock.user?.id ?? "";
     const msgId = generateMessageIDV2(selfId);
-    // Real WhatsApp Web wraps interactive messages in a viewOnceMessage
-    // envelope with messageContextInfo — the server SILENTLY DROPS a bare
-    // interactiveMessage (relay succeeds, nothing is delivered). This is the
-    // structure every working interactive-message implementation uses.
     const fullMsg = generateWAMessageFromContent(
       groupRef,
-      {
-        viewOnceMessage: {
-          message: {
-            messageContextInfo: {
-              deviceListMetadata: {},
-              deviceListMetadataVersion: 2,
-            },
-            interactiveMessage: payload.interactive,
-          },
-        },
-      } as never,
+      content as never,
       { userJid: selfId, messageId: msgId }
     );
     await sock.relayMessage(groupRef, fullMsg.message as never, {
@@ -475,9 +490,48 @@ export async function sendAdCard(
     });
     return true;
   } catch (e) {
-    log.error({ groupRef, err: String(e) }, "ad card send failed");
+    log.error({ groupRef, err: String(e) }, "raw relay failed");
     return false;
   }
+}
+
+/** A/B TEST: plain text through the SAME relayMessage path — isolates
+ * whether relayMessage itself delivers to groups on this session. */
+export async function sendTextViaRelay(
+  sock: WASocket,
+  groupRef: string,
+  text: string
+): Promise<boolean> {
+  return relayRaw(sock, groupRef, { conversation: text });
+}
+
+/** A/B TEST: hydratedTemplateMessage — the classic ad card (image + text +
+ * footer + URL button), an older established type that most clients render. */
+export async function sendTemplateCard(
+  sock: WASocket,
+  groupRef: string,
+  caption: string,
+  ctaUrl: string
+): Promise<boolean> {
+  const content = {
+    templateMessage: {
+      hydratedFourRowTemplate: {
+        hydratedContentText: caption,
+        hydratedFooterText: "ReachNet · Group Broadcast",
+        hydratedButtons: [
+          {
+            urlButton: {
+              displayText: "Chat on WhatsApp",
+              url: ctaUrl,
+              merchantUrl: ctaUrl,
+            },
+            index: 1,
+          },
+        ],
+      },
+    },
+  };
+  return relayRaw(sock, groupRef, content);
 }
 
 /* ── WhatsApp GROUP STATUS broadcast (the "green ring") ──────────
