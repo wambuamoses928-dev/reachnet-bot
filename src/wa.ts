@@ -12,7 +12,11 @@ import { db, syncGroups, updateLink, type BotLink } from "./store.js";
 const log = pino({ name: "wa" });
 
 // One live Baileys socket per connected user session.
-export const sessions = new Map<string, WASocket>(); // linkId -> sock
+export const sessions = new Map<string, WASocket>();
+// Pairing state (nexmint-wa-bot pattern): the number awaiting a code per link,
+// and pending resolvers so the API call can await the code from the handler.
+const pairingPhones = new Map<string, string>();
+const pairingWaiters = new Map<string, (code: string | null) => void>(); // linkId -> sock
 const dataDir = process.env.SESSION_DIR ?? "./data/sessions";
 
 function attrsFromMeta(meta: GroupMetadata, isOwner: boolean) {
@@ -86,6 +90,8 @@ async function startSession(
 
   sock.ev.on("creds.update", saveCreds);
 
+  let pairingRequestedOnThisSocket = false;
+
   sock.ev.on("connection.update", async (upd) => {
     const { connection, lastDisconnect, qr } = upd;
     if (qr) {
@@ -94,7 +100,46 @@ async function startSession(
       qrcode.default.generate(qr, { small: true });
       log.info({ linkId: link.id }, "QR available (fallback)");
     }
+
+    // ── REQUEST PAIRING CODE — on `connecting` (nexmint-wa-bot pattern) ──
+    // Waits for the noise handshake, then asks for the code. Lives HERE so a
+    // mid-pairing "Connection Closed" + auto-reconnect re-issues a FRESH code
+    // on the new socket (the old one dies with the dead socket).
+    if (
+      connection === "connecting" &&
+      !state.creds.registered &&
+      !pairingRequestedOnThisSocket &&
+      pairingPhones.get(link.id)
+    ) {
+      pairingRequestedOnThisSocket = true;
+      const digits = pairingPhones.get(link.id)!;
+      await sleep(3000); // noise handshake
+      try {
+        const code = await sock.requestPairingCode(digits);
+        await updateLink(link.id, {
+          pairing_code: code,
+          pairing_code_at: new Date().toISOString(),
+        });
+        log.info({ linkId: link.id }, "pairing code issued");
+        const waiter = pairingWaiters.get(link.id);
+        if (waiter) {
+          pairingWaiters.delete(link.id);
+          waiter(code);
+        }
+      } catch (e) {
+        pairingRequestedOnThisSocket = false; // allow retry on next connect
+        const msg = `requestPairingCode: ${String(e)}`;
+        log.error({ linkId: link.id, err: msg }, "pairing failed");
+        try {
+          await db.from("bot_debug").insert({ scope: "pairing", message: msg.slice(0, 500), detail: { linkId: link.id } });
+        } catch {
+          // best-effort
+        }
+      }
+    }
+
     if (connection === "open") {
+      pairingPhones.delete(link.id);
       sessions.set(link.id, sock);
       await updateLink(link.id, { status: "connected", pairing_code: null });
       await syncAllGroups(link.id, sock);
@@ -113,7 +158,23 @@ async function startSession(
         setTimeout(() => void startSession(link, onConnected), 5_000);
       } else {
         log.error({ linkId: link.id }, "session logged out — marking disconnected");
+        pairingPhones.delete(link.id);
+        const w = pairingWaiters.get(link.id);
+        if (w) { pairingWaiters.delete(link.id); w(null); }
         await updateLink(link.id, { status: "disconnected" });
+      }
+      if (shouldReconnect && pairingPhones.has(link.id)) {
+        // mid-pairing drop (e.g. WA "Connection Closed" on datacenter IPs):
+        // a fresh code will be issued on the new socket — record the drop.
+        try {
+          await db.from("bot_debug").insert({
+            scope: "session",
+            message: `mid-pairing drop (code ${code ?? "?"}) — reconnecting, fresh code will be issued`,
+            detail: { linkId: link.id },
+          });
+        } catch {
+          // best-effort
+        }
       }
     }
   });
@@ -121,42 +182,8 @@ async function startSession(
   return sock;
 }
 
-/** Boot-time: bring back every previously connected session. */
-export async function restoreSessions(onConnected: OnConnected) {
-  const { data: links } = await db
-    .from("bot_links")
-    .select("*")
-    .eq("platform", "whatsapp")
-    .eq("status", "connected");
-  for (const link of (links ?? []) as BotLink[]) {
-    try {
-      await startSession(link, onConnected);
-    } catch (e) {
-      log.error({ linkId: link.id, err: String(e) }, "failed to restore session");
-      await updateLink(link.id, { status: "disconnected" });
-    }
-  }
-}
 
-export async function sendToGroup(
-  sock: WASocket,
-  groupRef: string,
-  content: string
-): Promise<boolean> {
-  try {
-    await sock.sendMessage(groupRef, { text: content });
-    return true;
-  } catch (e) {
-    log.error({ groupRef, err: String(e) }, "send failed");
-    return false;
-  }
-}
-
-/**
- * Phone normalization — proven in the nexmint-wa-bot: digits only, with
- * Kenyan local-format fixes. Baileys builds the WA jid straight from this
- * string, so a leading "+" or local 0-format breaks pairing.
- */
+/** Phone normalization — proven in nexmint-wa-bot: digits only, KE fixes. */
 export function normalizePhone(input: string): string | null {
   if (!input) return null;
   let digits = input.trim().replace(/\D/g, "");
@@ -175,15 +202,14 @@ export function normalizePhone(input: string): string | null {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * API path for pairing — mirrors the pattern that worked in nexmint-wa-bot:
- * fresh auth dir, then request the pairing code inside the `connecting`
- * update after a 3s noise-handshake wait (calling it immediately after
- * socket creation fails; the IQ needs a live websocket).
+ * API path for pairing (nexmint-wa-bot pattern): set pairing state, start the
+ * session, and await the code issued by the connection handler. Mid-pairing
+ * drops auto-reconnect and re-issue a FRESH code without user action.
  */
 export async function startPairing(
   userId: string,
   phoneE164: string
-): Promise<{ linkId: string; pairingCode: string }> {
+): Promise<{ linkId: string; pairingCode: string; phone: string }> {
   const { data: existing } = await db
     .from("bot_links")
     .select("*")
@@ -194,10 +220,14 @@ export async function startPairing(
 
   if (link?.status === "connected") throw new Error("ALREADY_LINKED");
 
+  const digits = normalizePhone(phoneE164);
+  if (!digits) throw new Error("BAD_PHONE");
+  const canonical = `+${digits}`; // normalized E.164 — the UI shows the exact number
+
   if (!link) {
     const { data: created, error } = await db
       .from("bot_links")
-      .insert({ user_id: userId, platform: "whatsapp", status: "pending", phone_e164: phoneE164 })
+      .insert({ user_id: userId, platform: "whatsapp", status: "pending", phone_e164: canonical })
       .select()
       .single();
     if (error) throw error;
@@ -205,13 +235,10 @@ export async function startPairing(
   } else {
     await db
       .from("bot_links")
-      .update({ status: "pending", phone_e164: phoneE164, pairing_code: null, updated_date: new Date().toISOString() })
+      .update({ status: "pending", phone_e164: canonical, pairing_code: null, updated_date: new Date().toISOString() })
       .eq("id", link.id);
-    link = { ...link, status: "pending", phone_e164: phoneE164 };
+    link = { ...link, status: "pending", phone_e164: canonical };
   }
-
-  const digits = normalizePhone(phoneE164);
-  if (!digits) throw new Error("BAD_PHONE");
 
   // Re-pairing a previously-linked row (or a phone change): clear ALL auth
   // state for this link so the session pairs the NEW number, not the old one.
@@ -222,42 +249,54 @@ export async function startPairing(
   } catch {
     // ignore
   }
-  if (link.status === "disconnected" || (existing as BotLink | null)?.phone_e164 !== phoneE164) {
+  if (link.status === "disconnected" || (existing as BotLink | null)?.phone_e164 !== canonical) {
     fs.rmSync(`${dataDir}/${link.id}`, { recursive: true, force: true });
   }
 
-  const sock = await startSession(link, async () => {});
+  pairingPhones.set(link.id, digits);
 
-  let pairingCode: string | null = null;
-  let pairingErr: string | null = null;
-  let requested = false;
-
-  await new Promise<void>((resolve) => {
-    const giveUp = setTimeout(() => {
-      if (!pairingCode) pairingErr = pairingErr ?? "PAIR_TIMEOUT";
-      resolve();
-    }, 45_000);
-
-    sock.ev.on("connection.update", async (u: { connection?: string }) => {
-      if (u.connection === "connecting" && !requested) {
-        requested = true;
-        await sleep(3000); // noise handshake
-        try {
-          pairingCode = await sock.requestPairingCode(digits);
-          clearTimeout(giveUp);
-          resolve();
-        } catch (e) {
-          pairingErr = String(e);
-          clearTimeout(giveUp);
-          resolve();
-        }
-      }
+  const code = await new Promise<string | null>((resolve) => {
+    pairingWaiters.set(link.id, resolve);
+    void startSession(link, async () => {}).catch((e) => {
+      log.error({ err: String(e) }, "startSession failed during pairing");
+      resolve(null);
     });
+    setTimeout(() => {
+      if (pairingWaiters.has(link.id)) {
+        pairingWaiters.delete(link.id);
+        resolve(null);
+      }
+    }, 45_000);
   });
 
-  if (!pairingCode) throw new Error(pairingErr ?? "PAIR_FAILED");
+  if (!code) {
+    pairingPhones.delete(link.id);
+    throw new Error("PAIR_FAILED");
+  }
+  return { linkId: link.id, pairingCode: code, phone: canonical };
+}
 
-  await updateLink(link.id, { pairing_code: pairingCode });
-  log.info({ linkId: link.id }, "pairing code issued (API)");
-  return { linkId: link.id, pairingCode: pairingCode };
+/** Boot-time: bring back every previously connected session. */
+export async function restoreSessions(onConnected: OnConnected) {
+  const { data } = await db.from("bot_links").select("*").eq("status", "connected");
+  for (const l of (data ?? []) as BotLink[]) {
+    log.info({ linkId: l.id, phone: l.phone_e164 }, "restoring whatsapp session…");
+    void startSession(l, onConnected).catch((e) =>
+      log.error({ linkId: l.id, err: String(e) }, "restore failed"));
+  }
+}
+
+/** Send text to a linked group (used by the broadcast worker). */
+export async function sendToGroup(
+  sock: WASocket,
+  groupRef: string,
+  message: string
+): Promise<boolean> {
+  try {
+    await sock.sendMessage(groupRef, { text: message });
+    return true;
+  } catch (e) {
+    log.error({ groupRef, err: String(e) }, "group send failed");
+    return false;
+  }
 }

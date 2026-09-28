@@ -18,6 +18,7 @@ export type BotLink = {
   status: "pending" | "connected" | "disconnected";
   phone_e164?: string | null;
   pairing_code?: string | null;
+  pairing_code_at?: string | null;
   telegram_chat_id?: string | null;
 };
 
