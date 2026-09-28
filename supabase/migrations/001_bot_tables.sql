@@ -6,7 +6,7 @@ create extension if not exists "pgcrypto";
 -- One row per user<->platform connection (WhatsApp session or Telegram link).
 create table if not exists public.bot_links (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references public.profiles(id) on delete cascade,
+  user_id uuid not null references public.reachnet_profiles(id) on delete cascade,
   platform text not null check (platform in ('whatsapp', 'telegram')),
   status text not null default 'pending' check (status in ('pending', 'connected', 'disconnected')),
   phone_e164 text,
@@ -43,7 +43,7 @@ create table if not exists public.linked_groups (
 -- claims, sends to all enabled groups, and writes back stats.
 create table if not exists public.broadcasts (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references public.profiles(id) on delete cascade,
+  user_id uuid not null references public.reachnet_profiles(id) on delete cascade,
   content text not null,
   status text not null default 'queued' check (status in ('queued', 'sending', 'done', 'partial', 'failed')),
   stats jsonb,
