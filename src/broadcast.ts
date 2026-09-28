@@ -152,7 +152,7 @@ async function processOne(b: QueuedBroadcast) {
           const mediaArg = media?.url ? { url: media.url, mimetype: media.mimetype } : null;
           // A/B diagnostics: content prefixes force a specific sender so we
           // can identify which payload type WhatsApp actually delivers.
-          let variant: "auto" | "v2" | "template" | "relaytest" = "auto";
+          let variant: "auto" | "v2" | "template" | "relaytest" | "dmcard" = "auto";
           let body = content;
           if (content.startsWith("CARDV2:")) {
             variant = "v2"; body = content.slice(8).trim();
@@ -160,6 +160,8 @@ async function processOne(b: QueuedBroadcast) {
             variant = "template"; body = content.slice(9).trim();
           } else if (content.startsWith("RELAYTEST:")) {
             variant = "relaytest"; body = content.slice(10).trim();
+          } else if (content.startsWith("DMCARD:")) {
+            variant = "dmcard"; body = content.slice(7).trim();
           }
           if (variant === "relaytest") {
             ok = await withTimeout(
@@ -172,6 +174,16 @@ async function processOne(b: QueuedBroadcast) {
               sendTemplateCard(sock, g.group_ref, body, cta),
               120_000,
               `whatsapp template card to ${g.name}`
+            ).catch(() => false);
+          } else if (variant === "dmcard" && cta) {
+            // send the interactive card to the linked account's own DM
+            // ("Message yourself") — tests whether interactive cards are
+            // group-blocked but deliver person-to-person
+            const dmJid = `${phone}@s.whatsapp.net`;
+            ok = await withTimeout(
+              sendAdCard(sock, dmJid, body, cta, null, "v1"),
+              120_000,
+              `whatsapp dm card to ${g.name}`
             ).catch(() => false);
           } else if (cta) {
             ok = await withTimeout(
