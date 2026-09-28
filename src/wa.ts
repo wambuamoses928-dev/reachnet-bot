@@ -445,7 +445,18 @@ export async function sendAdCard(
         },
       },
     };
-    await sock.sendMessage(groupRef, payload as never);
+    // sock.sendMessage's generateWAMessageContent has no branch for the
+    // top-level "interactive" key in this Baileys version — it falls through
+    // to prepareWAMessageMedia and throws "Invalid media type". Build the
+    // Message proto ourselves and relay it directly instead.
+    const fullMsg = generateWAMessageFromContent(
+      groupRef,
+      { interactiveMessage: payload.interactive } as never,
+      { userJid: sock.user?.id, messageId: generateMessageIDV2(sock.user?.id) }
+    );
+    await sock.relayMessage(groupRef, fullMsg.message as never, {
+      messageId: (fullMsg.key.id ?? generateMessageIDV2(sock.user?.id)) as string,
+    });
     return true;
   } catch (e) {
     log.error({ groupRef, err: String(e) }, "ad card send failed");
