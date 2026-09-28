@@ -190,10 +190,10 @@ export function registerApi(app: express.Express) {
     try {
       const { Client } = await import("pg");
       const client = new Client({
-        host: `db.${process.env.SUPABASE_PROJECT_REF}.supabase.co`,
+        host: process.env.SUPABASE_POOLER_HOST ?? "aws-0-eu-central-1.pooler.supabase.com",
         port: 5432,
         database: "postgres",
-        user: "postgres",
+        user: `postgres.${process.env.SUPABASE_PROJECT_REF}`,
         password: process.env.SUPABASE_DB_PASSWORD,
         ssl: { rejectUnauthorized: false },
         statement_timeout: 30_000,
