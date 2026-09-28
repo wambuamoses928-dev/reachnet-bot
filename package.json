@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
-    "@whiskeysockets/baileys": "6.7.24",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
     "express": "^4.21.0",
     "grammy": "^1.30.0",
     "https-proxy-agent": "^9.1.0",
