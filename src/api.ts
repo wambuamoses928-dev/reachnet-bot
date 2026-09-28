@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import pino from "pino";
 import { db, type BotLink } from "./store.js";
-import { sessions, startPairing, syncAllGroups } from "./wa.js";
+import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions } from "./wa.js";
 
 const log = pino({ name: "api" });
 
@@ -148,5 +148,42 @@ export function registerApi(app: express.Express) {
     await db.from("bot_links").update({ status: "disconnected", pairing_code: null, updated_date: new Date().toISOString() }).eq("id", link.id);
     log.info({ uid, linkId: link.id }, "whatsapp disconnected via API");
     res.json({ ok: true });
+  });
+
+  // ── Pairing reset: wipe THIS user's WhatsApp auth folder so the next
+  //    "Get pairing code" starts from a completely fresh device identity.
+  //    Used after a pairing attempt was rejected — a poisoned/half-paired
+  //    identity folder keeps failing even when the code itself is fine.
+  app.post("/link/whatsapp/reset", async (req, res) => {
+    const uid = await userFrom(req, res);
+    if (!uid) return;
+    const link = await myLink(uid);
+    if (!link) {
+      res.status(404).json({ error: "No WhatsApp link found." });
+      return;
+    }
+    const sock = sessions.get(link.id);
+    sessions.delete(link.id);
+    try { sock?.end(undefined); } catch { /* already dead */ }
+    resetSession(link.id);
+    await db.from("bot_links").update({
+      status: "disconnected", pairing_code: null, updated_date: new Date().toISOString(),
+    }).eq("id", link.id);
+    log.info({ uid, linkId: link.id }, "whatsapp session reset — fresh identity on next pairing");
+    res.json({ ok: true });
+  });
+
+  // ── Ops: wipe ALL session folders (ADMIN_SECRET header). Only safe while
+  //    no live connected accounts exist; used to clear poisoned pairing
+  //    identities after WhatsApp pairing restrictions.
+  app.post("/admin/wipe-sessions", (req, res) => {
+    const secret = process.env.ADMIN_SECRET ?? "";
+    if (!secret || req.header("x-admin-secret") !== secret) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    const n = wipeAllSessions();
+    log.warn({ wiped: n }, "ALL session folders wiped via admin endpoint");
+    res.json({ ok: true, wiped: n });
   });
 }

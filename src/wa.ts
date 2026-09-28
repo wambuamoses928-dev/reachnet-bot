@@ -254,6 +254,23 @@ async function startSession(
 
 
 /** Phone normalization — proven in nexmint-wa-bot: digits only, KE fixes. */
+/** Wipe one link's auth folder — next pairing gets a fresh device identity. */
+export function resetSession(linkId: string): void {
+  fs.rmSync(`${dataDir}/${linkId}`, { recursive: true, force: true });
+}
+
+/** Wipe ALL auth folders (admin op). Returns count of folders removed. */
+export function wipeAllSessions(): number {
+  let n = 0;
+  try {
+    for (const name of fs.readdirSync(dataDir)) {
+      fs.rmSync(`${dataDir}/${name}`, { recursive: true, force: true });
+      n++;
+    }
+  } catch { /* empty or missing dir */ }
+  return n;
+}
+
 export function normalizePhone(input: string): string | null {
   if (!input) return null;
   let digits = input.trim().replace(/\D/g, "");
