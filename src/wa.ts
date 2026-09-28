@@ -396,6 +396,63 @@ export async function sendToGroup(
   }
 }
 
+/** Chat broadcast as an ad CARD: framed interactive message with a
+ * green "Chat on WhatsApp" CTA button (native flow cta_url), exactly like
+ * the UI preview. Falls back to plain text at the caller if it bounces. */
+export async function sendAdCard(
+  sock: WASocket,
+  groupRef: string,
+  caption: string,
+  ctaUrl: string,
+  media?: { url: string; mimetype?: string } | null
+): Promise<boolean> {
+  try {
+    let header: Record<string, unknown>;
+    if (media?.url) {
+      const gen = (await generateWAMessageContent(
+        { image: { url: media.url } },
+        { upload: sock.waUploadToServer } as never
+      )) as { imageMessage?: unknown };
+      header = {
+        title: "📣 ReachNet Broadcast",
+        subtitle: "Tap the button below to chat",
+        hasMediaAttachment: true,
+        imageMessage: gen.imageMessage,
+      };
+    } else {
+      header = {
+        title: "📣 ReachNet Broadcast",
+        subtitle: "Tap the button below to chat",
+        hasMediaAttachment: false,
+      };
+    }
+    const payload = {
+      interactive: {
+        header: header as never,
+        body: { text: caption?.trim() || " " },
+        footer: { text: "ReachNet · Group Broadcast" },
+        nativeFlowMessage: {
+          buttons: [
+            {
+              name: "cta_url",
+              buttonParamsJson: JSON.stringify({
+                display_text: "Chat on WhatsApp",
+                url: ctaUrl,
+                merchant_url: ctaUrl,
+              }),
+            },
+          ],
+        },
+      },
+    };
+    await sock.sendMessage(groupRef, payload as never);
+    return true;
+  } catch (e) {
+    log.error({ groupRef, err: String(e) }, "ad card send failed");
+    return false;
+  }
+}
+
 /* ── WhatsApp GROUP STATUS broadcast (the "green ring") ──────────
  * Ported from the proven nexmint-wa-bot protocol (24 days, zero
  * bans). Two-step, mirroring WhatsApp Web's own group status flow:

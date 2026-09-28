@@ -6,7 +6,7 @@ import {
   fetchQueuedBroadcasts,
   updateBroadcast,
 } from "./store.js";
-import { sendToGroup, sendGroupStatus, sessions } from "./wa.js";
+import { sendToGroup, sendAdCard, sendGroupStatus, sessions } from "./wa.js";
 import { sendToTelegramGroup } from "./tg.js";
 
 const log = pino({ name: "broadcast" });
@@ -142,16 +142,31 @@ async function processOne(b: QueuedBroadcast) {
         const sock = sessions.get(g.link_id);
         if (sock) {
           attempted = true;
-          ok = await withTimeout(
-            sendToGroup(
-              sock,
-              g.group_ref,
-              content,
-              media?.url ? { url: media.url, mimetype: media.mimetype } : null
-            ),
-            120_000,
-            `whatsapp send to ${g.name}`
-          ).catch(() => false);
+          // framed ad card with the green "Chat on WhatsApp" button; if the
+          // interactive payload bounces, fall back to plain text with the
+          // click-to-chat link spelled out
+          const phone = g.link?.phone_e164?.replace(/[^\d]/g, "");
+          const cta = phone
+            ? `https://wa.me/${phone}?text=${encodeURIComponent("Hello, can I get more information on this")}`
+            : null;
+          const mediaArg = media?.url ? { url: media.url, mimetype: media.mimetype } : null;
+          if (cta) {
+            ok = await withTimeout(
+              sendAdCard(sock, g.group_ref, content, cta, mediaArg),
+              120_000,
+              `whatsapp card to ${g.name}`
+            ).catch(() => false);
+          }
+          if (!ok) {
+            const plain = cta && !/wa\.me/i.test(content)
+              ? `${content}\n\nChat on WhatsApp 👉 ${cta}`
+              : content;
+            ok = await withTimeout(
+              sendToGroup(sock, g.group_ref, plain, mediaArg),
+              120_000,
+              `whatsapp send to ${g.name}`
+            ).catch(() => false);
+          }
         }
       } else if (g.platform === "telegram" && tgBot) {
         attempted = true;
