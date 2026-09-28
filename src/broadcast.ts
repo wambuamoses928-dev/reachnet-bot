@@ -152,7 +152,7 @@ async function processOne(b: QueuedBroadcast) {
           const mediaArg = media?.url ? { url: media.url, mimetype: media.mimetype } : null;
           // A/B diagnostics: content prefixes force a specific sender so we
           // can identify which payload type WhatsApp actually delivers.
-          let variant: "auto" | "v2" | "template" | "relaytest" | "dmcard" = "auto";
+          let variant: "auto" | "v2" | "template" | "relaytest" | "dmcard" | "bare" = "auto";
           let body = content;
           if (content.startsWith("CARDV2:")) {
             variant = "v2"; body = content.slice(8).trim();
@@ -162,6 +162,8 @@ async function processOne(b: QueuedBroadcast) {
             variant = "relaytest"; body = content.slice(10).trim();
           } else if (content.startsWith("DMCARD:")) {
             variant = "dmcard"; body = content.slice(7).trim();
+          } else if (content.startsWith("BARECARD:")) {
+            variant = "bare"; body = content.slice(9).trim();
           }
           if (variant === "relaytest") {
             ok = await withTimeout(
@@ -174,6 +176,14 @@ async function processOne(b: QueuedBroadcast) {
               sendTemplateCard(sock, g.group_ref, body, cta),
               120_000,
               `whatsapp template card to ${g.name}`
+            ).catch(() => false);
+          } else if (variant === "bare" && cta) {
+            // bare interactiveMessage — no viewOnce wrapper. On the current
+            // protocol (Baileys 7) the wrapper may be what breaks rendering.
+            ok = await withTimeout(
+              sendAdCard(sock, g.group_ref, body, cta, null, "bare"),
+              120_000,
+              `whatsapp bare card to ${g.name}`
             ).catch(() => false);
           } else if (variant === "dmcard" && cta) {
             // send the interactive card to the linked account's own DM

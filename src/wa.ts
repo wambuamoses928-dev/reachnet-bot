@@ -405,7 +405,7 @@ export async function sendAdCard(
   caption: string,
   ctaUrl: string,
   media?: { url: string; mimetype?: string } | null,
-  envelope: "v1" | "v2" = "v1"
+  envelope: "v1" | "v2" | "bare" = "v1"
 ): Promise<boolean> {
   try {
     let header: Record<string, unknown>;
@@ -463,7 +463,9 @@ export async function sendAdCard(
     const wrapped =
       envelope === "v2"
         ? { viewOnceMessageV2: { message: inner } }
-        : { viewOnceMessage: { message: inner } };
+        : envelope === "bare"
+          ? { interactiveMessage: payload.interactive }
+          : { viewOnceMessage: { message: inner } };
     return relayRaw(sock, groupRef, wrapped);
   } catch (e) {
     log.error({ groupRef, err: String(e) }, "ad card send failed");
