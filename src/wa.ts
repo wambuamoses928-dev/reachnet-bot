@@ -20,6 +20,8 @@ export const sessions = new Map<string, WASocket>();
 // Pairing state (nexmint-wa-bot pattern): the number awaiting a code per link,
 // and pending resolvers so the API call can await the code from the handler.
 const pairingPhones = new Map<string, string>();
+// restart-cycle counter per link DURING pairing (nexmint discipline: max 3)
+const pairingRetriesByLink = new Map<string, number>();
 const pairingWaiters = new Map<string, (code: string | null) => void>(); // linkId -> sock
 const dataDir = process.env.SESSION_DIR ?? "./data/sessions";
 
@@ -179,6 +181,7 @@ async function startSession(
 
     if (connection === "open") {
       pairingPhones.delete(link.id);
+      pairingRetriesByLink.delete(link.id);
       sessions.set(link.id, sock);
       await updateLink(link.id, { status: "connected", pairing_code: null });
       await syncAllGroups(link.id, sock);
@@ -217,10 +220,25 @@ async function startSession(
         } catch { /* best-effort */ }
       }
 
+      const pairingRetries = (pairingRetriesByLink.get(link.id) ?? 0);
       if (shouldReconnect) {
-        log.warn({ linkId: link.id, code }, "reconnecting whatsapp session…");
+        if (isPairing && pairingRetries >= 3) {
+          // nexmint-wa-bot proven discipline: max 3 restart cycles during
+          // pairing, then PARK. Endless re-issue loops hammer WhatsApp and
+          // trigger 24h+ pairing restrictions (Baileys issue #2691).
+          const msg = "Pairing stopped after 3 reconnects — WhatsApp is rate-limiting this attempt. Wait a few minutes, then press 'Get a new code' once.";
+          log.warn({ linkId: link.id }, msg);
+          try {
+            await db.from("bot_debug").insert({ scope: "pairing", message: msg, detail: { linkId: link.id } });
+          } catch { /* best-effort */ }
+          pairingPhones.delete(link.id);
+          return;
+        }
+        if (isPairing) pairingRetriesByLink.set(link.id, pairingRetries + 1);
+        const delay = isPairing ? Math.min(2_000 * 2 ** pairingRetries, 30_000) : 5_000;
+        log.warn({ linkId: link.id, code, delay }, "reconnecting whatsapp session…");
         await updateLink(link.id, { status: "pending" });
-        setTimeout(() => void startSession(link, onConnected), 5_000);
+        setTimeout(() => void startSession(link, onConnected), delay);
       } else {
         log.error({ linkId: link.id }, "session logged out — marking disconnected");
         pairingPhones.delete(link.id);
