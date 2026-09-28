@@ -202,8 +202,9 @@ async function startSession(
         try {
           await db.from("bot_debug").insert({ scope: "ipblock", message: msg, detail: { linkId: link.id, code } });
         } catch { /* best-effort */ }
+        // Do NOT auto-retry in a loop — hammering a blocked IP only makes
+        // the block worse. Park the link; the user retries via the UI button.
         await updateLink(link.id, { status: "pending" });
-        setTimeout(() => void startSession(link, onConnected), 15_000);
         return;
       }
       if (isPairing) {
