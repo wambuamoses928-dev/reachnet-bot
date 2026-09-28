@@ -1,12 +1,16 @@
 import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion,
+  Browsers,
   DisconnectReason,
   type WASocket,
   type GroupMetadata,
 } from "@whiskeysockets/baileys";
 import * as fs from "node:fs";
 import pino from "pino";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 import { db, syncGroups, updateLink, type BotLink } from "./store.js";
 
 const log = pino({ name: "wa" });
@@ -68,24 +72,59 @@ async function startSession(
   const { state, saveCreds } = await useMultiFileAuthState(
     `${dataDir}/${link.id}`
   );
+  // ── WA version: EXACT nexmint-wa-bot order — try the LIVE WhatsApp Web
+  //    version first (fetchLatestWaWebVersion), then the Baileys-published
+  //    one, then the proven constant. An outdated version string is one of
+  //    the things WhatsApp rejects device-linking for ("couldn't link device").
   let version: [number, number, number] | undefined;
   try {
-    const fetched = await fetchLatestBaileysVersion();
-    version = fetched.version;
+    const waResult = (await fetchLatestWaWebVersion({})) as { version?: [number, number, number] };
+    if (waResult?.version) {
+      version = waResult.version;
+      log.info({ version }, "using live WA Web version");
+    } else {
+      throw new Error("no version in response");
+    }
   } catch {
-    version = [2, 3000, 1043857760]; // fallback that worked in nexmint-wa-bot
+    try {
+      const fetched = await fetchLatestBaileysVersion();
+      version = fetched.version;
+      log.warn({ version }, "WA Web fetch failed — using Baileys version");
+    } catch {
+      version = [2, 3000, 1043857760]; // constant proven in nexmint-wa-bot
+    }
+  }
+
+  // ── PROXY support (nexmint-wa-bot pattern): WhatsApp blocks pairing from
+  //    many datacenter IPs. Set PROXY_URL (http/https/socks) to route the
+  //    socket through a residential/mobile proxy.
+  const proxyUrl = process.env.PROXY_URL?.trim() || "";
+  let proxyAgent: HttpsProxyAgent<string> | SocksProxyAgent | undefined;
+  if (proxyUrl) {
+    try {
+      proxyAgent = proxyUrl.startsWith("socks")
+        ? new SocksProxyAgent(proxyUrl)
+        : new HttpsProxyAgent(proxyUrl);
+      log.info({ proxy: proxyUrl.replace(/:[^:@/]+@/, ":***@") }, "using proxy for WA socket");
+    } catch (e) {
+      log.error({ err: String(e) }, "invalid PROXY_URL — connecting without proxy");
+    }
   }
 
   const sock = makeWASocket({
     version,
     auth: state,
     logger: pino({ level: "warn" }),
-    browser: ["ReachNet", "Chrome", "124.0.0"],
+    // REAL fingerprint, exactly like the working nexmint-wa-bot. A made-up
+    // platform string ("ReachNet") is a known cause of instant
+    // "couldn't link device — check phone number" rejections.
+    browser: Browsers.ubuntu("Chrome"),
     markOnlineOnConnect: false, // stay "offline": messages still deliver, looks human
     syncFullHistory: false,
     connectTimeoutMs: 20_000,
     keepAliveIntervalMs: 30_000,
     defaultQueryTimeoutMs: 120_000,
+    ...(proxyAgent ? { agent: proxyAgent } : {}),
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -152,6 +191,31 @@ async function startSession(
       const shouldReconnect =
         code !== DisconnectReason.loggedOut && code !== 401;
       sessions.delete(link.id);
+
+      // nexmint-wa-bot pattern: 401/428 while pairing (creds not yet
+      // registered) = WhatsApp rejecting the datacenter IP itself. Reconnect
+      // loops won't help — record it so the owner can set PROXY_URL.
+      const isPairing = pairingPhones.has(link.id);
+      if (isPairing && (code === 401 || code === 428)) {
+        const msg = `WhatsApp rejected pairing (status ${code}) — likely datacenter IP block. Set PROXY_URL to a residential/mobile proxy.`;
+        log.error({ linkId: link.id, code }, msg);
+        try {
+          await db.from("bot_debug").insert({ scope: "ipblock", message: msg, detail: { linkId: link.id, code } });
+        } catch { /* best-effort */ }
+        await updateLink(link.id, { status: "pending" });
+        setTimeout(() => void startSession(link, onConnected), 15_000);
+        return;
+      }
+      if (isPairing) {
+        try {
+          await db.from("bot_debug").insert({
+            scope: "session",
+            message: `mid-pairing close, status ${code ?? "?"} — ${String(lastDisconnect?.error ?? "")}`,
+            detail: { linkId: link.id },
+          });
+        } catch { /* best-effort */ }
+      }
+
       if (shouldReconnect) {
         log.warn({ linkId: link.id, code }, "reconnecting whatsapp session…");
         await updateLink(link.id, { status: "pending" });
@@ -162,19 +226,6 @@ async function startSession(
         const w = pairingWaiters.get(link.id);
         if (w) { pairingWaiters.delete(link.id); w(null); }
         await updateLink(link.id, { status: "disconnected" });
-      }
-      if (shouldReconnect && pairingPhones.has(link.id)) {
-        // mid-pairing drop (e.g. WA "Connection Closed" on datacenter IPs):
-        // a fresh code will be issued on the new socket — record the drop.
-        try {
-          await db.from("bot_debug").insert({
-            scope: "session",
-            message: `mid-pairing drop (code ${code ?? "?"}) — reconnecting, fresh code will be issued`,
-            detail: { linkId: link.id },
-          });
-        } catch {
-          // best-effort
-        }
       }
     }
   });
