@@ -190,7 +190,7 @@ export function registerApi(app: express.Express) {
     try {
       const { Client } = await import("pg");
       const client = new Client({
-        host: process.env.SUPABASE_POOLER_HOST ?? "aws-0-eu-central-1.pooler.supabase.com",
+        host: String(req.body?.host ?? "aws-0-eu-central-1.pooler.supabase.com"),
         port: 5432,
         database: "postgres",
         user: `postgres.${process.env.SUPABASE_PROJECT_REF}`,
