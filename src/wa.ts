@@ -451,9 +451,23 @@ export async function sendAdCard(
     // Message proto ourselves and relay it directly instead.
     const selfId = sock.user?.id ?? "";
     const msgId = generateMessageIDV2(selfId);
+    // Real WhatsApp Web wraps interactive messages in a viewOnceMessage
+    // envelope with messageContextInfo — the server SILENTLY DROPS a bare
+    // interactiveMessage (relay succeeds, nothing is delivered). This is the
+    // structure every working interactive-message implementation uses.
     const fullMsg = generateWAMessageFromContent(
       groupRef,
-      { interactiveMessage: payload.interactive } as never,
+      {
+        viewOnceMessage: {
+          message: {
+            messageContextInfo: {
+              deviceListMetadata: {},
+              deviceListMetadataVersion: 2,
+            },
+            interactiveMessage: payload.interactive,
+          },
+        },
+      } as never,
       { userJid: selfId, messageId: msgId }
     );
     await sock.relayMessage(groupRef, fullMsg.message as never, {
