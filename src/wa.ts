@@ -5,6 +5,7 @@ import makeWASocket, {
   type WASocket,
   type GroupMetadata,
 } from "@whiskeysockets/baileys";
+import * as fs from "node:fs";
 import pino from "pino";
 import { db, syncGroups, updateLink, type BotLink } from "./store.js";
 
@@ -63,15 +64,24 @@ async function startSession(
   const { state, saveCreds } = await useMultiFileAuthState(
     `${dataDir}/${link.id}`
   );
-  const { version } = await fetchLatestBaileysVersion();
+  let version: [number, number, number] | undefined;
+  try {
+    const fetched = await fetchLatestBaileysVersion();
+    version = fetched.version;
+  } catch {
+    version = [2, 3000, 1043857760]; // fallback that worked in nexmint-wa-bot
+  }
 
   const sock = makeWASocket({
     version,
     auth: state,
-    logger: pino({ level: "silent" }),
+    logger: pino({ level: "warn" }),
     browser: ["ReachNet", "Chrome", "124.0.0"],
     markOnlineOnConnect: false, // stay "offline": messages still deliver, looks human
     syncFullHistory: false,
+    connectTimeoutMs: 20_000,
+    keepAliveIntervalMs: 30_000,
+    defaultQueryTimeoutMs: 120_000,
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -79,7 +89,7 @@ async function startSession(
   sock.ev.on("connection.update", async (upd) => {
     const { connection, lastDisconnect, qr } = upd;
     if (qr) {
-      // QR fallback — primary path is the pairing code (see linkWhatsapp()).
+      // QR fallback — primary path is the pairing code (see startPairing()).
       const qrcode = await import("qrcode-terminal");
       qrcode.default.generate(qr, { small: true });
       log.info({ linkId: link.id }, "QR available (fallback)");
@@ -109,32 +119,6 @@ async function startSession(
   });
 
   return sock;
-}
-
-/** Step 1 of linking: create the link row, fire up a session, return the pairing
- *  code the user types into WhatsApp → Linked devices. No QR scan needed. */
-export async function linkWhatsapp(
-  userId: string,
-  phoneE164: string
-): Promise<{ linkId: string; pairingCode: string }> {
-  const { data: link, error } = await db
-    .from("bot_links")
-    .insert({
-      user_id: userId,
-      platform: "whatsapp",
-      status: "pending",
-      phone_e164: phoneE164,
-    })
-    .select()
-    .single();
-  if (error) throw error;
-
-  const sock = await startSession(link as BotLink, async () => {});
-
-  const pairingCode = await sock.requestPairingCode(phoneE164);
-  await updateLink(link.id, { pairing_code: pairingCode as string });
-  log.info({ linkId: link.id }, "pairing code issued");
-  return { linkId: link.id, pairingCode: pairingCode as string };
 }
 
 /** Boot-time: bring back every previously connected session. */
@@ -168,8 +152,34 @@ export async function sendToGroup(
   }
 }
 
-/** API path for pairing: reuse an existing (pending/disconnected) link row,
- *  create one if none, then issue a fresh pairing code. */
+/**
+ * Phone normalization — proven in the nexmint-wa-bot: digits only, with
+ * Kenyan local-format fixes. Baileys builds the WA jid straight from this
+ * string, so a leading "+" or local 0-format breaks pairing.
+ */
+export function normalizePhone(input: string): string | null {
+  if (!input) return null;
+  let digits = input.trim().replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.length === 10 && digits.startsWith("0")) {
+    digits = "254" + digits.slice(1);
+  } else if (digits.length === 9 && (digits.startsWith("7") || digits.startsWith("1"))) {
+    digits = "254" + digits;
+  } else if (digits.startsWith("2540") && digits.length >= 13) {
+    digits = "254" + digits.slice(4);
+  }
+  if (digits.length < 10 || digits.length > 15) return null;
+  return digits;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * API path for pairing — mirrors the pattern that worked in nexmint-wa-bot:
+ * fresh auth dir, then request the pairing code inside the `connecting`
+ * update after a 3s noise-handshake wait (calling it immediately after
+ * socket creation fails; the IQ needs a live websocket).
+ */
 export async function startPairing(
   userId: string,
   phoneE164: string
@@ -200,7 +210,11 @@ export async function startPairing(
     link = { ...link, status: "pending", phone_e164: phoneE164 };
   }
 
-  // Kill any stale socket for this link before starting a new session.
+  const digits = normalizePhone(phoneE164);
+  if (!digits) throw new Error("BAD_PHONE");
+
+  // Re-pairing a previously-linked row (or a phone change): clear ALL auth
+  // state for this link so the session pairs the NEW number, not the old one.
   const stale = sessions.get(link.id);
   sessions.delete(link.id);
   try {
@@ -208,30 +222,42 @@ export async function startPairing(
   } catch {
     // ignore
   }
+  if (link.status === "disconnected" || (existing as BotLink | null)?.phone_e164 !== phoneE164) {
+    fs.rmSync(`${dataDir}/${link.id}`, { recursive: true, force: true });
+  }
 
   const sock = await startSession(link, async () => {});
 
-  // Baileys builds the WA jid straight from this string — MUST be digits only
-  // (a leading "+" produces an invalid jid and the pairing IQ fails).
-  const digits = phoneE164.replace(/\D/g, "");
-  if (digits.length < 8) throw new Error("BAD_PHONE");
+  let pairingCode: string | null = null;
+  let pairingErr: string | null = null;
+  let requested = false;
 
-  // The pairing IQ needs a live websocket. The QR event is the "socket ready"
-  // signal — wait for it (or an open connection) before requesting the code.
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("PAIR_SOCKET_TIMEOUT")), 25_000);
-    const onUpdate = (u: { connection?: string; qr?: string }) => {
-      if (u.qr || u.connection === "open") {
-        clearTimeout(timer);
-        sock.ev.off("connection.update", onUpdate);
-        resolve();
+  await new Promise<void>((resolve) => {
+    const giveUp = setTimeout(() => {
+      if (!pairingCode) pairingErr = pairingErr ?? "PAIR_TIMEOUT";
+      resolve();
+    }, 45_000);
+
+    sock.ev.on("connection.update", async (u: { connection?: string }) => {
+      if (u.connection === "connecting" && !requested) {
+        requested = true;
+        await sleep(3000); // noise handshake
+        try {
+          pairingCode = await sock.requestPairingCode(digits);
+          clearTimeout(giveUp);
+          resolve();
+        } catch (e) {
+          pairingErr = String(e);
+          clearTimeout(giveUp);
+          resolve();
+        }
       }
-    };
-    sock.ev.on("connection.update", onUpdate);
+    });
   });
 
-  const pairingCode = await sock.requestPairingCode(digits);
-  await updateLink(link.id, { pairing_code: pairingCode as string });
+  if (!pairingCode) throw new Error(pairingErr ?? "PAIR_FAILED");
+
+  await updateLink(link.id, { pairing_code: pairingCode });
   log.info({ linkId: link.id }, "pairing code issued (API)");
-  return { linkId: link.id, pairingCode: pairingCode as string };
+  return { linkId: link.id, pairingCode: pairingCode };
 }
