@@ -3,6 +3,9 @@ FROM node:22-alpine
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+# postinstall swaps in the vendored WAProto — needs these dirs BEFORE npm ci
+COPY scripts/install-waproto.js scripts/
+COPY vendor/waproto vendor/waproto
 RUN npm ci --no-audit --no-fund
 
 COPY tsconfig.json ./
