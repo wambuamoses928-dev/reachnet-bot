@@ -78,9 +78,11 @@ export function registerApi(app: express.Express) {
   app.post("/link/whatsapp/start", async (req, res) => {
     const uid = await userFrom(req, res);
     if (!uid) return;
+    // Accept local formats too — normalizePhone (nexmint-wa-bot pattern) is
+    // the single source of truth: 07xx…, 7xx…, +254…, 254… all work.
     const phone = String(req.body?.phone ?? "").trim();
-    if (!/^\+\d{8,15}$/.test(phone)) {
-      res.status(400).json({ error: "Phone must be in international format, e.g. +2547XXXXXXXX" });
+    if (phone.replace(/\D/g, "").length < 9) {
+      res.status(400).json({ error: "Enter your phone number, e.g. +2547XXXXXXXX or 07XXXXXXXX" });
       return;
     }
     try {
