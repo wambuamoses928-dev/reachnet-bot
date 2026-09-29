@@ -32,6 +32,18 @@ const pairingPhones = new Map<string, string>();
  * without a store to answer from, the phone shows "Waiting for this
  * message. This may take a while." forever. */
 const sentMessages = new Map<string, unknown>();
+/* pending relay receipts: id → destination. Cleared when WhatsApp's server
+ * acks the message. A relay that stays pending was silently dropped. */
+const pendingReceipts = new Map<string, string>();
+export function traceReceipt(id: string | undefined, dest: string) {
+  if (!id) return;
+  pendingReceipts.set(id, dest);
+  setTimeout(() => {
+    if (pendingReceipts.has(id)) {
+      log.warn({ id, dest }, "NO SERVER ACK in 45s — message likely dropped by server");
+    }
+  }, 45_000).unref?.();
+}
 export function rememberSent(remoteJid: string, id: string | undefined, content: unknown) {
   if (!id) return;
   sentMessages.set(`${remoteJid}|${id}`, content);
@@ -159,6 +171,19 @@ async function startSession(
   });
 
   sock.ev.on("creds.update", saveCreds);
+  // Server ack/delivery receipts for our own relayed messages
+  sock.ev.on("messages.update", (updates) => {
+    for (const u of updates) {
+      const id = u.key?.id;
+      if (id && pendingReceipts.has(id)) {
+        log.info(
+          { id, dest: pendingReceipts.get(id), status: u.update?.status ?? "ack" },
+          "SERVER RECEIPT for relayed message"
+        );
+        if (u.update?.status !== undefined) pendingReceipts.delete(id);
+      }
+    }
+  });
 
   let pairingRequestedOnThisSocket = false;
 
@@ -514,6 +539,7 @@ async function relayRaw(
       { userJid: selfId, messageId: msgId }
     );
     rememberSent(groupRef, fullMsg.key.id ?? msgId, fullMsg.message);
+    traceReceipt(fullMsg.key.id ?? msgId, groupRef);
     await sock.relayMessage(groupRef, fullMsg.message as never, {
       messageId: fullMsg.key.id ?? msgId,
     });
