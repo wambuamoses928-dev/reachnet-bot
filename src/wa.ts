@@ -171,7 +171,20 @@ async function startSession(
   });
 
   sock.ev.on("creds.update", saveCreds);
-  // Server ack/delivery receipts for our own relayed messages
+  // Server ack/delivery receipts for our own relayed messages.
+  // DM acks → messages.update; GROUP acks → message-receipt.update (per participant).
+  sock.ev.on("message-receipt.update", (updates) => {
+    for (const u of updates) {
+      const id = u.key?.id;
+      if (id && pendingReceipts.has(id)) {
+        log.info(
+          { id, dest: pendingReceipts.get(id), receipt: Object.keys(u.receipt ?? {}) },
+          "GROUP RECEIPT for relayed message"
+        );
+        pendingReceipts.delete(id);
+      }
+    }
+  });
   sock.ev.on("messages.update", (updates) => {
     for (const u of updates) {
       const id = u.key?.id;
