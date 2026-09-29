@@ -80,7 +80,30 @@ function extractLinks(text: string | null | undefined): string[] {
 }
 
 /** Full group sync: every group the linked WhatsApp account is IN (not just admin). */
-export async function syncAllGroups(linkId: string, sock: WASocket) {
+/** Marketers linked to a WhatsApp with more than 20 groups are auto-verified. */
+const AUTO_VERIFY_MIN_GROUPS = 20;
+export async function autoVerifyMarketer(userId: string, groupCount: number): Promise<void> {
+  try {
+    if (groupCount <= AUTO_VERIFY_MIN_GROUPS) return;
+    const { data: prof, error: readErr } = await db
+      .from("reachnet_profiles")
+      .select("verification_status")
+      .eq("id", userId)
+      .single();
+    if (readErr) throw readErr;
+    if (!prof || prof.verification_status === "verified") return;
+    const { error } = await db
+      .from("reachnet_profiles")
+      .update({ verification_status: "verified" })
+      .eq("id", userId);
+    if (error) throw error;
+    log.info({ userId, groups: groupCount }, "marketer AUTO-VERIFIED (20+ groups)");
+  } catch (e) {
+    log.error({ userId, err: String(e) }, "auto-verify failed");
+  }
+}
+
+export async function syncAllGroups(linkId: string, sock: WASocket, userId?: string) {
   const list = await sock.groupFetchAllParticipating();
   const groups = Object.values(list).map((meta) => {
     const me = sock.user?.id?.replace(/:\d+$/, "");
@@ -97,6 +120,9 @@ export async function syncAllGroups(linkId: string, sock: WASocket) {
   });
   const n = await syncGroups(linkId, "whatsapp", groups);
   log.info({ linkId, groups: groups.length }, "whatsapp groups synced");
+  // AUTO-VERIFY: marketers whose WhatsApp account is in more than 20
+  // groups become verified automatically — no manual community review
+  if (userId) await autoVerifyMarketer(userId, groups.length);
   return n;
 }
 
@@ -251,7 +277,7 @@ async function startSession(
       pairingRetriesByLink.delete(link.id);
       sessions.set(link.id, sock);
       await updateLink(link.id, { status: "connected", pairing_code: null });
-      await syncAllGroups(link.id, sock);
+      await syncAllGroups(link.id, sock, link.user_id);
       await onConnected(link.id, sock);
       log.info({ linkId: link.id }, "whatsapp session connected");
     }

@@ -6,7 +6,7 @@ import {
   fetchQueuedBroadcasts,
   updateBroadcast,
 } from "./store.js";
-import { sendToGroup, sendAdCard, sendGroupStatus, sessions, sendTextViaRelay, sendTemplateCard, sendLinkCard } from "./wa.js";
+import { sendToGroup, sendGroupStatus, sessions, sendTextViaRelay, sendImageCard } from "./wa.js";
 import { sendToTelegramGroup } from "./tg.js";
 
 const log = pino({ name: "broadcast" });
@@ -142,78 +142,41 @@ async function processOne(b: QueuedBroadcast) {
         const sock = sessions.get(g.link_id);
         if (sock) {
           attempted = true;
-          // framed ad card with the green "Chat on WhatsApp" button; if the
-          // interactive payload bounces, fall back to plain text with the
-          // click-to-chat link spelled out
-          const phone = g.link?.phone_e164?.replace(/[^\d]/g, "");
-          const cta = phone
-            ? `https://wa.me/${phone}?text=${encodeURIComponent("Hello, can I get more information on this")}`
-            : null;
+          // SIMPLE FORMAT (Moses's call): the marketer's own message goes
+          // out verbatim as a normal group message — any link they include
+          // (short or otherwise) stays exactly as typed. No auto-generated
+          // wa.me click-to-chat link, no boilerplate, no framed card.
+          // The message-relay path is used because direct sends have shown
+          // server-side delivery quirks; plain text via the relay is the
+          // one format proven to deliver 100%.
           const mediaArg = media?.url ? { url: media.url, mimetype: media.mimetype } : null;
-          // A/B diagnostics: content prefixes force a specific sender so we
-          // can identify which payload type WhatsApp actually delivers.
-          let variant: "auto" | "v2" | "template" | "relaytest" | "dmcard" | "bare" = "auto";
-          let body = content;
-          if (content.startsWith("CARDV2:")) {
-            variant = "v2"; body = content.slice(8).trim();
-          } else if (content.startsWith("TEMPLATE:")) {
-            variant = "template"; body = content.slice(9).trim();
-          } else if (content.startsWith("RELAYTEST:")) {
-            variant = "relaytest"; body = content.slice(10).trim();
-          } else if (content.startsWith("DMCARD:")) {
-            variant = "dmcard"; body = content.slice(7).trim();
-          } else if (content.startsWith("BARECARD:")) {
-            variant = "bare"; body = content.slice(9).trim();
-          }
-          if (variant === "relaytest") {
+          const mediaUrl = media?.url ?? null;
+          if (mediaArg && mediaUrl) {
             ok = (await withTimeout(
-              sendTextViaRelay(sock, g.group_ref, body),
+              sendImageCard(sock, g.group_ref, mediaUrl, content, ""),
               120_000,
-              `whatsapp relay test to ${g.name}`
+              `whatsapp image send to ${g.name}`
             ).catch(() => ({ ok: false }))) .ok;
-          } else if (variant === "template" && cta) {
-            ok = await withTimeout(
-              sendTemplateCard(sock, g.group_ref, body, cta),
-              120_000,
-              `whatsapp template card to ${g.name}`
-            ).catch(() => false);
-          } else if (variant === "bare" && cta) {
-            // bare interactiveMessage — no viewOnce wrapper. On the current
-            // protocol (Baileys 7) the wrapper may be what breaks rendering.
+            if (!ok) {
+              ok = await withTimeout(
+                sendToGroup(sock, g.group_ref, content, mediaArg),
+                120_000,
+                `whatsapp image send to ${g.name}`
+              ).catch(() => false);
+            }
+          } else {
             ok = (await withTimeout(
-              sendAdCard(sock, g.group_ref, body, cta, null, "bare"),
-              120_000,
-              `whatsapp bare card to ${g.name}`
-            ).catch(() => ({ ok: false }))) .ok;
-          } else if (variant === "dmcard" && cta) {
-            // send the interactive card to the linked account's own DM
-            // ("Message yourself") — tests whether interactive cards are
-            // group-blocked but deliver person-to-person
-            const dmJid = `${phone}@s.whatsapp.net`;
-            ok = (await withTimeout(
-              sendAdCard(sock, dmJid, body, cta, null, "v1"),
-              120_000,
-              `whatsapp dm card to ${g.name}`
-            ).catch(() => ({ ok: false }))) .ok;
-          } else if (cta) {
-            // native interactive cards are silently dropped by WhatsApp's
-            // server on consumer accounts — the link-preview card is the
-            // guaranteed-delivery production format
-            ok = (await withTimeout(
-              sendLinkCard(sock, g.group_ref, body, cta),
-              120_000,
-              `whatsapp link card to ${g.name}`
-            ).catch(() => ({ ok: false }))) .ok;
-          }
-          if (!ok) {
-            const plain = cta && !/wa\.me/i.test(body)
-              ? `${body}\n\nChat on WhatsApp 👉 ${cta}`
-              : body;
-            ok = await withTimeout(
-              sendToGroup(sock, g.group_ref, plain, mediaArg),
+              sendTextViaRelay(sock, g.group_ref, content),
               120_000,
               `whatsapp send to ${g.name}`
-            ).catch(() => false);
+            ).catch(() => ({ ok: false }))) .ok;
+            if (!ok) {
+              ok = await withTimeout(
+                sendToGroup(sock, g.group_ref, content, null),
+                120_000,
+                `whatsapp send to ${g.name}`
+              ).catch(() => false);
+            }
           }
         }
       } else if (g.platform === "telegram" && tgBot) {

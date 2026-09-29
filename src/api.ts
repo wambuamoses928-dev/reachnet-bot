@@ -2,6 +2,7 @@ import express, { type Request, type Response, type NextFunction } from "express
 import pino from "pino";
 import { db, type BotLink } from "./store.js";
 import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions, sendAdCard, sendToGroup, sendTextViaRelay, sendLinkCard, sendImageCard } from "./wa.js";
+import { runSql } from "./sql.js";
 
 const log = pino({ name: "api" });
 
@@ -220,7 +221,7 @@ export function registerApi(app: express.Express) {
       return;
     }
     try {
-      const n = await syncAllGroups(link.id, sock);
+      const n = await syncAllGroups(link.id, sock, link.user_id);
       res.json({ ok: true, groups: n });
     } catch (e) {
       log.error({ uid, err: String(e) }, "group refresh failed");
@@ -270,6 +271,28 @@ export function registerApi(app: express.Express) {
     }).eq("id", link.id);
     log.info({ uid, linkId: link.id }, "whatsapp session reset — fresh identity on next pairing");
     res.json({ ok: true });
+  });
+
+  // ── Ops: run raw SQL against the ReachNet database (ADMIN_SECRET header).
+  // Direct DB port is blocked from most sandboxes; the worker has egress.
+  // Used for one-time migrations (trigger changes) that PostgREST can't do.
+  app.post("/debug/sql", async (req, res) => {
+    const secret = process.env.ADMIN_SECRET ?? "";
+    if (!secret || req.headers["x-admin-secret"] !== secret) {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
+    try {
+      const { sql } = (req.body ?? {}) as { sql?: string };
+      if (!sql || typeof sql !== "string") {
+        res.status(400).json({ error: "sql required" });
+        return;
+      }
+      const { rows } = await runSql(sql);
+      res.json({ ok: true, rows: rows.slice(0, 20) });
+    } catch (e) {
+      res.status(500).json({ error: String(e) });
+    }
   });
 
   // ── Ops: wipe ALL session folders (ADMIN_SECRET header). Only safe while
