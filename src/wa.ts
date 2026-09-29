@@ -504,7 +504,12 @@ export async function sendImageCard(
   ctaUrl: string
 ): Promise<{ ok: boolean; id?: string }> {
   try {
-    const text = `${caption.trim()}\n\nChat with the marketer 👇\n${ctaUrl}`;
+    // the image now carries a baked-in green "Chat on WhatsApp" footer
+    // button graphically, so the caption only needs the message + the
+    // one line WhatsApp requires to be literal, tappable text — WhatsApp
+    // has no image-hotspot/click-region concept, so SOME line of real
+    // text must contain the URL for any tap-to-open to work at all.
+    const text = `${caption.trim()}\n\n${ctaUrl}`;
     const msg = await sock.sendMessage(groupRef, {
       image: { url: imageUrl },
       caption: text,
