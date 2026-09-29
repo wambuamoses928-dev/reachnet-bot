@@ -507,6 +507,9 @@ export async function sendAdCard(
               }),
             },
           ],
+          // real Meta cards carry a version on the native flow — without it
+          // the server may reject the message as an unknown flow format
+          messageVersion: 3,
         },
       },
     };
