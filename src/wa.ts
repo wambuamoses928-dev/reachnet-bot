@@ -481,7 +481,7 @@ export async function sendLinkCard(
       rememberSent(groupRef, msg.key.id, msg.message);
       traceReceipt(msg.key.id, groupRef);
     }
-    return { ok: true, id: msg?.key?.id };
+    return { ok: true, id: (msg?.key?.id as string) ?? undefined };
   } catch (e) {
     log.error({ groupRef, err: String(e) }, "link card send failed");
     return { ok: false };
