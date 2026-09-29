@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import pino from "pino";
 import { db, type BotLink } from "./store.js";
-import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions, sendAdCard, sendToGroup, sendTextViaRelay } from "./wa.js";
+import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions, sendAdCard, sendToGroup, sendTextViaRelay, sendLinkCard } from "./wa.js";
 
 const log = pino({ name: "api" });
 
@@ -78,8 +78,8 @@ export function registerApi(app: express.Express) {
       res.status(403).json({ error: "forbidden" });
       return;
     }
-    const { name, caption, url, envelope, asText } = (req.body ?? {}) as {
-      name?: string; caption?: string; url?: string; envelope?: "v1" | "v2" | "bare"; asText?: boolean;
+    const { name, caption, url, envelope, asText, asLink } = (req.body ?? {}) as {
+      name?: string; caption?: string; url?: string; envelope?: "v1" | "v2" | "bare"; asText?: boolean; asLink?: boolean;
     };
     if (!name) { res.status(400).json({ error: "name required" }); return; }
     try {
@@ -98,7 +98,9 @@ export function registerApi(app: express.Express) {
         const sock = sessions.get(g.link_id);
         if (!sock) { results.push({ group: g.name, ok: false, error: "no session" }); continue; }
         const cta = url ?? "https://wa.me/254700000000";
-        const sent = asText
+        const sent = asLink
+          ? await sendLinkCard(sock, g.group_ref, caption ?? "ReachNet link card", cta)
+          : asText
           ? await sendTextViaRelay(sock, g.group_ref, caption ?? "ReachNet text relay control")
           : await sendAdCard(
               sock,
@@ -123,8 +125,8 @@ export function registerApi(app: express.Express) {
       res.status(403).json({ error: "forbidden" });
       return;
     }
-    const { caption, url, envelope, asText } = (req.body ?? {}) as {
-      caption?: string; url?: string; envelope?: "v1" | "v2" | "bare"; asText?: boolean;
+    const { caption, url, envelope, asText, asLink } = (req.body ?? {}) as {
+      caption?: string; url?: string; envelope?: "v1" | "v2" | "bare"; asText?: boolean; asLink?: boolean;
     };
     for (const [linkId, sock] of sessions) {
       // resolve the account's own phone JID (LID-independent)
@@ -148,7 +150,9 @@ export function registerApi(app: express.Express) {
       if (!jid) { res.status(500).json({ error: "could not resolve own jid", candidates }); return; }
       const cta = url ?? "https://wa.me/254700000000";
       try {
-        const sent = asText
+        const sent = asLink
+          ? await sendLinkCard(sock, jid, caption ?? "ReachNet DM link card", cta)
+          : asText
           ? await sendTextViaRelay(sock, jid, caption ?? "ReachNet DM text test")
           : await sendAdCard(sock, jid, caption ?? "ReachNet DM card test", cta, null, envelope ?? "v1");
         res.json({ linkId, jid, ok: sent.ok, id: sent.id });

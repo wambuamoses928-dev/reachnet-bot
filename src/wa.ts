@@ -463,6 +463,31 @@ export async function sendToGroup(
 /** Chat broadcast as an ad CARD: framed interactive message with a
  * green "Chat on WhatsApp" CTA button (native flow cta_url), exactly like
  * the UI preview. Falls back to plain text at the caller if it bounces. */
+/* ── GUARANTEED-DELIVERY "card": text + wa.me link preview ─────────
+ * WhatsApp's server silently drops native interactive cards from
+ * consumer accounts (proven via receipts: no server ack, group AND dm).
+ * A plain text message with the wa.me URL renders as a framed,
+ * tappable "Chat on WhatsApp" preview card and cannot be dropped. */
+export async function sendLinkCard(
+  sock: WASocket,
+  groupRef: string,
+  caption: string,
+  ctaUrl: string
+): Promise<{ ok: boolean; id?: string }> {
+  try {
+    const body = `📣 ReachNet Broadcast\n\n${caption.trim()}\n\nChat with the marketer 👇\n${ctaUrl}`;
+    const msg = await sock.sendMessage(groupRef, { text: body });
+    if (msg?.key?.id) {
+      rememberSent(groupRef, msg.key.id, msg.message);
+      traceReceipt(msg.key.id, groupRef);
+    }
+    return { ok: true, id: msg?.key?.id };
+  } catch (e) {
+    log.error({ groupRef, err: String(e) }, "link card send failed");
+    return { ok: false };
+  }
+}
+
 export async function sendAdCard(
   sock: WASocket,
   groupRef: string,

@@ -6,7 +6,7 @@ import {
   fetchQueuedBroadcasts,
   updateBroadcast,
 } from "./store.js";
-import { sendToGroup, sendAdCard, sendGroupStatus, sessions, sendTextViaRelay, sendTemplateCard } from "./wa.js";
+import { sendToGroup, sendAdCard, sendGroupStatus, sessions, sendTextViaRelay, sendTemplateCard, sendLinkCard } from "./wa.js";
 import { sendToTelegramGroup } from "./tg.js";
 
 const log = pino({ name: "broadcast" });
@@ -196,10 +196,13 @@ async function processOne(b: QueuedBroadcast) {
               `whatsapp dm card to ${g.name}`
             ).catch(() => ({ ok: false }))) .ok;
           } else if (cta) {
+            // native interactive cards are silently dropped by WhatsApp's
+            // server on consumer accounts — the link-preview card is the
+            // guaranteed-delivery production format
             ok = (await withTimeout(
-              sendAdCard(sock, g.group_ref, body, cta, mediaArg, variant === "v2" ? "v2" : "v1"),
+              sendLinkCard(sock, g.group_ref, body, cta),
               120_000,
-              `whatsapp card to ${g.name}`
+              `whatsapp link card to ${g.name}`
             ).catch(() => ({ ok: false }))) .ok;
           }
           if (!ok) {
