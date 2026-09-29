@@ -166,11 +166,11 @@ async function processOne(b: QueuedBroadcast) {
             variant = "bare"; body = content.slice(9).trim();
           }
           if (variant === "relaytest") {
-            ok = await withTimeout(
+            ok = (await withTimeout(
               sendTextViaRelay(sock, g.group_ref, body),
               120_000,
               `whatsapp relay test to ${g.name}`
-            ).catch(() => false);
+            ).catch(() => ({ ok: false }))) .ok;
           } else if (variant === "template" && cta) {
             ok = await withTimeout(
               sendTemplateCard(sock, g.group_ref, body, cta),
@@ -180,27 +180,27 @@ async function processOne(b: QueuedBroadcast) {
           } else if (variant === "bare" && cta) {
             // bare interactiveMessage — no viewOnce wrapper. On the current
             // protocol (Baileys 7) the wrapper may be what breaks rendering.
-            ok = await withTimeout(
+            ok = (await withTimeout(
               sendAdCard(sock, g.group_ref, body, cta, null, "bare"),
               120_000,
               `whatsapp bare card to ${g.name}`
-            ).catch(() => false);
+            ).catch(() => ({ ok: false }))) .ok;
           } else if (variant === "dmcard" && cta) {
             // send the interactive card to the linked account's own DM
             // ("Message yourself") — tests whether interactive cards are
             // group-blocked but deliver person-to-person
             const dmJid = `${phone}@s.whatsapp.net`;
-            ok = await withTimeout(
+            ok = (await withTimeout(
               sendAdCard(sock, dmJid, body, cta, null, "v1"),
               120_000,
               `whatsapp dm card to ${g.name}`
-            ).catch(() => false);
+            ).catch(() => ({ ok: false }))) .ok;
           } else if (cta) {
-            ok = await withTimeout(
+            ok = (await withTimeout(
               sendAdCard(sock, g.group_ref, body, cta, mediaArg, variant === "v2" ? "v2" : "v1"),
               120_000,
               `whatsapp card to ${g.name}`
-            ).catch(() => false);
+            ).catch(() => ({ ok: false }))) .ok;
           }
           if (!ok) {
             const plain = cta && !/wa\.me/i.test(body)

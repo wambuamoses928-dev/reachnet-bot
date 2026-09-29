@@ -470,7 +470,7 @@ export async function sendAdCard(
   ctaUrl: string,
   media?: { url: string; mimetype?: string } | null,
   envelope: "v1" | "v2" | "bare" = "v1"
-): Promise<boolean> {
+): Promise<{ ok: boolean; id?: string }> {
   try {
     let header: Record<string, unknown>;
     if (media?.url) {
@@ -530,19 +530,19 @@ export async function sendAdCard(
         : envelope === "bare"
           ? { interactiveMessage: payload.interactive }
           : { viewOnceMessage: { message: inner } };
-    return relayRaw(sock, groupRef, wrapped);
+    return await relayRaw(sock, groupRef, wrapped);
   } catch (e) {
     log.error({ groupRef, err: String(e) }, "ad card send failed");
-    return false;
+    return { ok: false };
   }
 }
 
 /** Relay a raw pre-built WAMessage (content map) to a group. */
-async function relayRaw(
+export async function relayRaw(
   sock: WASocket,
   groupRef: string,
   content: Record<string, unknown>
-): Promise<boolean> {
+): Promise<{ ok: boolean; id?: string }> {
   try {
     const selfId = sock.user?.id ?? "";
     const msgId = generateMessageIDV2(selfId);
@@ -556,10 +556,10 @@ async function relayRaw(
     await sock.relayMessage(groupRef, fullMsg.message as never, {
       messageId: fullMsg.key.id ?? msgId,
     });
-    return true;
+    return { ok: true, id: (fullMsg.key.id as string) ?? msgId };
   } catch (e) {
     log.error({ groupRef, err: String(e) }, "raw relay failed");
-    return false;
+    return { ok: false };
   }
 }
 
@@ -569,7 +569,7 @@ export async function sendTextViaRelay(
   sock: WASocket,
   groupRef: string,
   text: string
-): Promise<boolean> {
+): Promise<{ ok: boolean; id?: string }> {
   return relayRaw(sock, groupRef, { conversation: text });
 }
 
@@ -599,7 +599,8 @@ export async function sendTemplateCard(
       },
     },
   };
-  return relayRaw(sock, groupRef, content);
+  const r = await relayRaw(sock, groupRef, content);
+  return r.ok;
 }
 
 /* ── WhatsApp GROUP STATUS broadcast (the "green ring") ──────────

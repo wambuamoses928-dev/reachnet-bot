@@ -98,7 +98,7 @@ export function registerApi(app: express.Express) {
         const sock = sessions.get(g.link_id);
         if (!sock) { results.push({ group: g.name, ok: false, error: "no session" }); continue; }
         const cta = url ?? "https://wa.me/254700000000";
-        const ok = asText
+        const sent = asText
           ? await sendTextViaRelay(sock, g.group_ref, caption ?? "ReachNet text relay control")
           : await sendAdCard(
               sock,
@@ -108,7 +108,7 @@ export function registerApi(app: express.Express) {
               null,
               envelope ?? "v1"
             );
-        results.push({ group: g.name, groupRef: g.group_ref, ok });
+        results.push({ group: g.name, groupRef: g.group_ref, ok: sent.ok, id: sent.id });
       }
       res.json({ results });
     } catch (e) {
@@ -139,15 +139,19 @@ export function registerApi(app: express.Express) {
       }
       const su = (sock as unknown as { user?: { id?: unknown } }).user;
       if (su && typeof su.id === "string") candidates.push(su.id);
-      const jid = candidates.find((c) => c.includes("@s.whatsapp.net"))
+      const raw = candidates.find((c) => c.includes("@s.whatsapp.net"))
         ?? candidates[0];
+      if (!raw) { res.status(500).json({ error: "could not resolve own jid", candidates }); return; }
+      // strip the ":device" suffix — a full JID targets one device (the bot
+      // itself); the bare JID delivers to the whole account incl. the phone
+      const jid = raw.split(":")[0] + "@s.whatsapp.net";
       if (!jid) { res.status(500).json({ error: "could not resolve own jid", candidates }); return; }
       const cta = url ?? "https://wa.me/254700000000";
       try {
-        const ok = asText
-          ? await sendToGroup(sock, jid, caption ?? "ReachNet DM text test")
+        const sent = asText
+          ? await sendTextViaRelay(sock, jid, caption ?? "ReachNet DM text test")
           : await sendAdCard(sock, jid, caption ?? "ReachNet DM card test", cta, null, envelope ?? "v1");
-        res.json({ linkId, jid, ok, candidates });
+        res.json({ linkId, jid, ok: sent.ok, id: sent.id });
         return;
       } catch (e) {
         res.status(500).json({ error: String(e), jid });
