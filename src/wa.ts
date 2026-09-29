@@ -24,6 +24,25 @@ export const sessions = new Map<string, WASocket>();
 // Pairing state (nexmint-wa-bot pattern): the number awaiting a code per link,
 // and pending resolvers so the API call can await the code from the handler.
 const pairingPhones = new Map<string, string>();
+
+/* ── SENT-MESSAGE STORE ──────────────────────────────────────────
+ * Backs the socket's getMessage callback. When a recipient phone
+ * can't decrypt a rich message (interactive/viewOnce cards are the
+ * classic case) it re-requests the content from the sender's devices;
+ * without a store to answer from, the phone shows "Waiting for this
+ * message. This may take a while." forever. */
+const sentMessages = new Map<string, unknown>();
+export function rememberSent(remoteJid: string, id: string | undefined, content: unknown) {
+  if (!id) return;
+  sentMessages.set(`${remoteJid}|${id}`, content);
+  sentMessages.set(id, content);
+  if (sentMessages.size > 4000) {
+    for (const k of sentMessages.keys()) {
+      sentMessages.delete(k);
+      if (sentMessages.size <= 3000) break;
+    }
+  }
+}
 // restart-cycle counter per link DURING pairing (nexmint discipline: max 3)
 const pairingRetriesByLink = new Map<string, number>();
 const pairingWaiters = new Map<string, (code: string | null) => void>(); // linkId -> sock
@@ -130,6 +149,12 @@ async function startSession(
     connectTimeoutMs: 20_000,
     keepAliveIntervalMs: 30_000,
     defaultQueryTimeoutMs: 120_000,
+    // Answer recipient re-requests for messages we sent (fixes
+    // "Waiting for this message" for interactive cards)
+    getMessage: async (key) =>
+      (sentMessages.get(`${key.remoteJid ?? ""}|${key.id ?? ""}`) ??
+        sentMessages.get(key.id ?? "") ??
+        undefined) as never,
     ...(proxyAgent ? { agent: proxyAgent } : {}),
   });
 
@@ -388,7 +413,8 @@ export async function sendToGroup(
     const content = media?.url
       ? { image: { url: media.url }, caption: message || undefined }
       : { text: message };
-    await sock.sendMessage(groupRef, content);
+    const sent = await sock.sendMessage(groupRef, content);
+    rememberSent(groupRef, sent?.key?.id ?? undefined, sent?.message);
     return true;
   } catch (e) {
     log.error({ groupRef, err: String(e) }, "group send failed");
@@ -487,6 +513,7 @@ async function relayRaw(
       content as never,
       { userJid: selfId, messageId: msgId }
     );
+    rememberSent(groupRef, fullMsg.key.id ?? msgId, fullMsg.message);
     await sock.relayMessage(groupRef, fullMsg.message as never, {
       messageId: fullMsg.key.id ?? msgId,
     });

@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import pino from "pino";
 import { db, type BotLink } from "./store.js";
-import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions } from "./wa.js";
+import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions, sendAdCard } from "./wa.js";
 
 const log = pino({ name: "api" });
 
@@ -68,6 +68,50 @@ export function registerApi(app: express.Express) {
       return;
     }
     next();
+  });
+
+  // ── DEBUG: send a test ad card to ONE group (service-key guarded).
+  // Used to iterate on card delivery without touching broadcast state.
+  app.post("/debug/card", async (req: Request, res: Response) => {
+    const auth = (req.headers["x-debug-key"] as string | undefined) ?? "";
+    if (!SERVICE_KEY || auth !== SERVICE_KEY) {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
+    const { name, caption, url, envelope } = (req.body ?? {}) as {
+      name?: string; caption?: string; url?: string; envelope?: "v1" | "v2" | "bare";
+    };
+    if (!name) { res.status(400).json({ error: "name required" }); return; }
+    try {
+      const { data, error } = await db
+        .from("linked_groups")
+        .select("id, group_ref, link_id, name")
+        .eq("name", name)
+        .eq("platform", "whatsapp")
+        .limit(5);
+      if (error || !data?.length) {
+        res.status(404).json({ error: error?.message ?? "group not found" });
+        return;
+      }
+      const results: Array<Record<string, unknown>> = [];
+      for (const g of data) {
+        const sock = sessions.get(g.link_id);
+        if (!sock) { results.push({ group: g.name, ok: false, error: "no session" }); continue; }
+        const cta = url ?? "https://wa.me/254700000000";
+        const ok = await sendAdCard(
+          sock,
+          g.group_ref,
+          caption ?? "ReachNet test card",
+          cta,
+          null,
+          envelope ?? "v1"
+        );
+        results.push({ group: g.name, groupRef: g.group_ref, ok });
+      }
+      res.json({ results });
+    } catch (e) {
+      res.status(500).json({ error: String(e) });
+    }
   });
 
   app.get("/health", (_req, res) => {
