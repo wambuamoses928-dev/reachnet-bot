@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import pino from "pino";
 import { db, type BotLink } from "./store.js";
-import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions, sendAdCard } from "./wa.js";
+import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions, sendAdCard, sendToGroup } from "./wa.js";
 
 const log = pino({ name: "api" });
 
@@ -112,6 +112,47 @@ export function registerApi(app: express.Express) {
     } catch (e) {
       res.status(500).json({ error: String(e) });
     }
+  });
+
+  // ── DEBUG: send a test ad card to the linked account's OWN DM.
+  app.post("/debug/dm-card", async (req: Request, res: Response) => {
+    const auth = (req.headers["x-debug-key"] as string | undefined) ?? "";
+    if (!SERVICE_KEY || auth !== SERVICE_KEY) {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
+    const { caption, url, envelope, asText } = (req.body ?? {}) as {
+      caption?: string; url?: string; envelope?: "v1" | "v2" | "bare"; asText?: boolean;
+    };
+    for (const [linkId, sock] of sessions) {
+      // resolve the account's own phone JID (LID-independent)
+      const candidates: string[] = [];
+      const me = (sock as unknown as { authState?: { creds?: { me?: unknown } } })
+        .authState?.creds?.me;
+      if (typeof me === "string") candidates.push(me);
+      else if (me && typeof me === "object") {
+        const o = me as { id?: unknown; lid?: unknown };
+        if (typeof o.id === "string") candidates.push(o.id);
+        if (typeof o.lid === "string") candidates.push(o.lid);
+      }
+      const su = (sock as unknown as { user?: { id?: unknown } }).user;
+      if (su && typeof su.id === "string") candidates.push(su.id);
+      const jid = candidates.find((c) => c.includes("@s.whatsapp.net"))
+        ?? candidates[0];
+      if (!jid) { res.status(500).json({ error: "could not resolve own jid", candidates }); return; }
+      const cta = url ?? "https://wa.me/254700000000";
+      try {
+        const ok = asText
+          ? await sendToGroup(sock, jid, caption ?? "ReachNet DM text test")
+          : await sendAdCard(sock, jid, caption ?? "ReachNet DM card test", cta, null, envelope ?? "v1");
+        res.json({ linkId, jid, ok, candidates });
+        return;
+      } catch (e) {
+        res.status(500).json({ error: String(e), jid });
+        return;
+      }
+    }
+    res.status(503).json({ error: "no active session" });
   });
 
   app.get("/health", (_req, res) => {
