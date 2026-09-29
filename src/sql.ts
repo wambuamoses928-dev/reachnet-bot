@@ -7,19 +7,26 @@ import { Pool } from "pg";
  */
 let pool: Pool | null = null;
 let cachedHost: string | null = null;
+let cachedStyle: "direct" | "pooler" | null = null;
 
-const POOLER_HOSTS = [
-  "aws-0-eu-central-1.pooler.supabase.com",
-  "aws-1-eu-central-1.pooler.supabase.com",
-  "aws-0-us-east-1.pooler.supabase.com",
-  "aws-0-ap-southeast-1.pooler.supabase.com",
+// [host, style] — direct host uses plain "postgres"; regional poolers use
+// the tenant form "postgres.<ref>". Probed in order; the working one cached.
+const CANDIDATES: Array<[string, "direct" | "pooler"]> = [
+  ["aws-0-eu-central-1.pooler.supabase.com", "pooler"],
+  ["aws-1-eu-central-1.pooler.supabase.com", "pooler"],
+  ["aws-0-eu-west-1.pooler.supabase.com", "pooler"],
+  ["aws-0-us-east-1.pooler.supabase.com", "pooler"],
+  ["aws-1-us-east-1.pooler.supabase.com", "pooler"],
+  ["aws-0-us-west-1.pooler.supabase.com", "pooler"],
+  ["aws-0-ap-southeast-1.pooler.supabase.com", "pooler"],
+  ["aws-0-sa-east-1.pooler.supabase.com", "pooler"],
 ];
 
-async function connectOnce(host: string, password: string, ref: string) {
+async function connectOnce(host: string, style: "direct" | "pooler", password: string, ref: string) {
   const p = new Pool({
     host,
     port: 5432,
-    user: `postgres.${ref}`,
+    user: style === "direct" ? "postgres" : `postgres.${ref}`,
     password,
     database: "postgres",
     max: 1,
@@ -37,11 +44,15 @@ export async function runSql(sql: string): Promise<{ rows: Record<string, unknow
   if (!password || !ref) throw new Error("SUPABASE_DB_PASSWORD / SUPABASE_PROJECT_REF not set");
   if (!pool) {
     let lastErr: unknown = null;
-    for (const host of [cachedHost, ...POOLER_HOSTS.filter((h) => h !== cachedHost)]) {
-      if (!host) continue;
+    const tryList: Array<[string, "direct" | "pooler"]> = [];
+    if (cachedHost) tryList.push([cachedHost, cachedStyle!]);
+    tryList.push([`db.${ref}.supabase.co`, "direct"]);
+    for (const c of CANDIDATES) if (c[0] !== cachedHost) tryList.push(c);
+    for (const [host, style] of tryList) {
       try {
-        pool = await connectOnce(host, password, ref);
+        pool = await connectOnce(host, style, password, ref);
         cachedHost = host;
+        cachedStyle = style;
         break;
       } catch (e) {
         lastErr = e;
