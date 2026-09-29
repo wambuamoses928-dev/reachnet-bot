@@ -488,6 +488,38 @@ export async function sendLinkCard(
   }
 }
 
+/* ── IMAGE CARD: designed graphic + tappable link in caption ────────
+ * Native interactive buttons are silently dropped by WhatsApp's server
+ * for non-Business numbers, and WhatsApp suppresses link-preview
+ * thumbnails for its own wa.me domain — so neither approach can show
+ * a rendered "card". A standard image message is NOT blocked (only
+ * interactive/native-flow messages are), and its caption keeps a
+ * normal tappable link — this is the closest guaranteed-delivery
+ * approximation of a branded, clickable card. */
+export async function sendImageCard(
+  sock: WASocket,
+  groupRef: string,
+  imageUrl: string,
+  caption: string,
+  ctaUrl: string
+): Promise<{ ok: boolean; id?: string }> {
+  try {
+    const text = `${caption.trim()}\n\nChat with the marketer 👇\n${ctaUrl}`;
+    const msg = await sock.sendMessage(groupRef, {
+      image: { url: imageUrl },
+      caption: text,
+    });
+    if (msg?.key?.id) {
+      rememberSent(groupRef, msg.key.id, msg.message);
+      traceReceipt(msg.key.id, groupRef);
+    }
+    return { ok: true, id: (msg?.key?.id as string) ?? undefined };
+  } catch (e) {
+    log.error({ groupRef, err: String(e) }, "image card send failed");
+    return { ok: false };
+  }
+}
+
 export async function sendAdCard(
   sock: WASocket,
   groupRef: string,

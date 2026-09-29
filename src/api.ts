@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import pino from "pino";
 import { db, type BotLink } from "./store.js";
-import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions, sendAdCard, sendToGroup, sendTextViaRelay, sendLinkCard } from "./wa.js";
+import { sessions, startPairing, syncAllGroups, resetSession, wipeAllSessions, sendAdCard, sendToGroup, sendTextViaRelay, sendLinkCard, sendImageCard } from "./wa.js";
 
 const log = pino({ name: "api" });
 
@@ -78,8 +78,8 @@ export function registerApi(app: express.Express) {
       res.status(403).json({ error: "forbidden" });
       return;
     }
-    const { name, caption, url, envelope, asText, asLink } = (req.body ?? {}) as {
-      name?: string; caption?: string; url?: string; envelope?: "v1" | "v2" | "bare"; asText?: boolean; asLink?: boolean;
+    const { name, caption, url, envelope, asText, asLink, asImage, imageUrl } = (req.body ?? {}) as {
+      name?: string; caption?: string; url?: string; envelope?: "v1" | "v2" | "bare"; asText?: boolean; asLink?: boolean; asImage?: boolean; imageUrl?: string;
     };
     if (!name) { res.status(400).json({ error: "name required" }); return; }
     try {
@@ -98,7 +98,9 @@ export function registerApi(app: express.Express) {
         const sock = sessions.get(g.link_id);
         if (!sock) { results.push({ group: g.name, ok: false, error: "no session" }); continue; }
         const cta = url ?? "https://wa.me/254700000000";
-        const sent = asLink
+        const sent = asImage
+          ? await sendImageCard(sock, g.group_ref, imageUrl ?? "https://media.base44.com/images/public/6a7af065faa7f6636d17f4d8/cfaff1ba9_generated_image.png", caption ?? "ReachNet image card", cta)
+          : asLink
           ? await sendLinkCard(sock, g.group_ref, caption ?? "ReachNet link card", cta)
           : asText
           ? await sendTextViaRelay(sock, g.group_ref, caption ?? "ReachNet text relay control")
@@ -125,8 +127,8 @@ export function registerApi(app: express.Express) {
       res.status(403).json({ error: "forbidden" });
       return;
     }
-    const { caption, url, envelope, asText, asLink } = (req.body ?? {}) as {
-      caption?: string; url?: string; envelope?: "v1" | "v2" | "bare"; asText?: boolean; asLink?: boolean;
+    const { caption, url, envelope, asText, asLink, asImage, imageUrl } = (req.body ?? {}) as {
+      caption?: string; url?: string; envelope?: "v1" | "v2" | "bare"; asText?: boolean; asLink?: boolean; asImage?: boolean; imageUrl?: string;
     };
     for (const [linkId, sock] of sessions) {
       // resolve the account's own phone JID (LID-independent)
@@ -150,7 +152,9 @@ export function registerApi(app: express.Express) {
       if (!jid) { res.status(500).json({ error: "could not resolve own jid", candidates }); return; }
       const cta = url ?? "https://wa.me/254700000000";
       try {
-        const sent = asLink
+        const sent = asImage
+          ? await sendImageCard(sock, jid, imageUrl ?? "https://media.base44.com/images/public/6a7af065faa7f6636d17f4d8/cfaff1ba9_generated_image.png", caption ?? "ReachNet DM image card", cta)
+          : asLink
           ? await sendLinkCard(sock, jid, caption ?? "ReachNet DM link card", cta)
           : asText
           ? await sendTextViaRelay(sock, jid, caption ?? "ReachNet DM text test")
