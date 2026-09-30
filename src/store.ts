@@ -40,6 +40,8 @@ export type Broadcast = {
   id: string;
   user_id: string;
   content: string;
+  reachnet_material_id?: string | null;
+  reachnet_ad_id?: string | null;
   /** delivery form: plain group message or WhatsApp group status (green ring) */
   mode?: "chat" | "status" | null;
   media_url?: string | null;

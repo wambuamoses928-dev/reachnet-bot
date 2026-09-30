@@ -41,6 +41,8 @@ type QueuedBroadcast = {
   media_url?: string | null;
   media_kind?: string | null;
   media_mimetype?: string | null;
+  /** set when this broadcast promotes a paid business ad */
+  reachnet_ad_id?: string | null;
 };
 
 async function processOne(b: QueuedBroadcast) {
@@ -200,6 +202,28 @@ async function processOne(b: QueuedBroadcast) {
 
   const status = results.failed === 0 ? "done" : results.sent === 0 ? "failed" : "partial";
   await updateBroadcast(broadcastId, { status, stats: results });
+
+  // ── Paid ad settlement: credit the marketer for real delivered reach.
+  // Reach delivered = member counts of the groups the send actually hit. ──
+  if (b.reachnet_ad_id && (status === "done" || status === "partial")) {
+    try {
+      const perGroup = (results.perGroup as Array<{ group: string; ok: boolean }>) ?? [];
+      const okGroups = new Set(perGroup.filter((g) => g.ok).map((g) => g.group));
+      const groups = await enabledGroupsForUser(userId);
+      const deliveredReach = groups
+        .filter((g) => okGroups.size === 0 || okGroups.has(g.group_ref))
+        .reduce((sum: number, g) => sum + (g.member_count || 0), 0);
+      const { error: settleErr } = await db.rpc("reachnet_settle_ad_broadcast", {
+        p_broadcast_id: broadcastId,
+        p_delivered_reach: deliveredReach,
+      });
+      if (settleErr) log.error({ broadcastId, err: String(settleErr) }, "ad settle failed");
+      else log.info({ broadcastId, adId: b.reachnet_ad_id, reach: deliveredReach }, "ad broadcast settled");
+    } catch (e) {
+      log.error({ broadcastId, err: String(e) }, "ad settlement crashed");
+    }
+  }
+
   log.info({ broadcastId, status, mode: mode ?? "chat", sent: results.sent, failed: results.failed }, "broadcast finished");
 }
 

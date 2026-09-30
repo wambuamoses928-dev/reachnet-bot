@@ -471,11 +471,13 @@ export async function sendToGroup(
   sock: WASocket,
   groupRef: string,
   message: string,
-  media?: { url: string; mimetype?: string } | null
+  media?: { url: string; kind?: string | null; mimetype?: string } | null
 ): Promise<boolean> {
   try {
     const content = media?.url
-      ? { image: { url: media.url }, caption: message || undefined }
+      ? media.kind === "video"
+        ? { video: { url: media.url }, caption: message || undefined }
+        : { image: { url: media.url }, caption: message || undefined }
       : { text: message };
     const sent = await sock.sendMessage(groupRef, content);
     rememberSent(groupRef, sent?.key?.id ?? undefined, sent?.message);
