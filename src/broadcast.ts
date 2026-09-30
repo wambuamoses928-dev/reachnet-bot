@@ -208,10 +208,11 @@ async function processOne(b: QueuedBroadcast) {
   if (b.reachnet_ad_id && (status === "done" || status === "partial")) {
     try {
       const perGroup = (results.perGroup as Array<{ group: string; ok: boolean }>) ?? [];
-      const okGroups = new Set(perGroup.filter((g) => g.ok).map((g) => g.group));
+      // perGroup entries carry the group NAME — match linked groups by name
+      const okNames = new Set(perGroup.filter((g) => g.ok).map((g) => g.group));
       const groups = await enabledGroupsForUser(userId);
       const deliveredReach = groups
-        .filter((g) => okGroups.size === 0 || okGroups.has(g.group_ref))
+        .filter((g) => okNames.size === 0 || okNames.has(g.name))
         .reduce((sum: number, g) => sum + (g.member_count || 0), 0);
       const { error: settleErr } = await db.rpc("reachnet_settle_ad_broadcast", {
         p_broadcast_id: broadcastId,
